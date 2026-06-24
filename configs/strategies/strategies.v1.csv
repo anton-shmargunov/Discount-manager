@@ -1,0 +1,81 @@
+# PBA Strategies v1 — discount + prom (prom sections reserved)
+# One row per bin/category. Percent values may use % suffix or decimal ratio.
+
+[meta]
+version,1
+
+[discount.defaults]
+sold_zero_strategy,Conservative
+sold_zero_balance,-1%
+default_margin_strategy,Moderate
+margin_mode,Margin categories
+
+[discount.conservative_bins]
+lower_dSt_QW,dDiscount
+min,2%
+-50%,2%
+-30%,1%
+-10%,0
+-5%,0
+0,0
+5%,0
+10%,-1%
+30%,-2%
+50%,-2%
+max,
+
+[discount.moderate_bins]
+lower_dSt_QW,dDiscount
+min,5%
+-50%,4%
+-30%,3%
+-10%,2%
+-5%,0
+0,0
+5%,-2%
+10%,-3%
+30%,-4%
+50%,-5%
+max,
+
+[discount.strong_bins]
+lower_dSt_QW,dDiscount
+min,7%
+-50%,5%
+-30%,4%
+-10%,3%
+-5%,2%
+0,-2%
+5%,-3%
+10%,-4%
+30%,-5%
+50%,-7%
+max,
+
+[discount.margin_categories]
+lower_margin,upper_margin,strategy
+min,0,Conservative
+0,100,Conservative
+100,1000,Moderate
+1000,max,Moderate
+
+[discount.mtost_strategy]
+enabled,true
+balance,2%
+
+[discount.mtost_bins]
+lower_dMtoSt_QW,dDiscount
+0,-2%
+20%,0
+50%,2%
+max,
+
+# --- Prom (future) ---
+# [prom.defaults]
+# missing_prom_default,n/a
+#
+# [prom.conservative_bins]
+# lower_dSt_QW,dProm
+#
+# [prom.margin_categories]
+# lower_margin,upper_margin,strategy

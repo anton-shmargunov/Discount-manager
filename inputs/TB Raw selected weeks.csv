@@ -1,0 +1,4 @@
+basket, Stock[last from selected], Stock[last from selected -1],..., Sold[last from selected], Sold[last from selected -1],...,Margin[last from selected], Margin[last from selected -1],...,AvgSalePrice[last from selected], AvgSalePrice[last from selected -1],...,
+1111
+1112
+etc

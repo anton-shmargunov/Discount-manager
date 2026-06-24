@@ -1,0 +1,564 @@
+﻿Phase 1 Architecture & Development Specification
+AI-Assisted Analytical Web Application (Prototype → SaaS Migration Path)
+________________
+
+
+1. Project Goal
+The application is being developed as an analytical intelligence platform focused on:
+* multidimensional data analysis,
+* clustering,
+* optimization,
+* predictive modeling,
+* exploratory analytics,
+* autonomous analytical workflows,
+* report generation,
+* future AI-assisted recommendations.
+The current phase is:
+Phase 1 — Analytical Prototype
+Main goals:
+* rapidly evolve analytical logic,
+* validate workflows,
+* test UX patterns,
+* build reusable analytical core,
+* avoid technical debt before SaaS migration.
+The application must be designed from the beginning for future migration into a production-grade full-stack SaaS architecture.
+________________
+
+
+2. Phase 1 Technology Stack
+UI / Prototype Layer
+* Python
+* Streamlit
+* Plotly
+Analytics / Modeling
+* pandas
+* numpy
+* scipy
+* scikit-learn
+Storage
+* DuckDB
+* parquet
+* CSV
+Environment
+* Visual Studio Code
+* GitHub
+* GitHub Copilot (Claude model preferred)
+________________
+
+
+3. Core Architectural Principle
+CRITICAL RULE
+UI can depend on analytics.
+
+
+Analytics must NEVER depend on UI.
+
+
+This rule is mandatory.
+The analytical engine must remain fully independent from:
+* Streamlit,
+* frontend code,
+* APIs,
+* visualization frameworks.
+This allows future reuse inside:
+* FastAPI,
+* background workers,
+* AI agents,
+* notebooks,
+* tests,
+* autonomous services,
+* SaaS backend.
+________________
+
+
+4. Phase 1 Project Structure
+project_root/
+│
+├── app.py
+│
+├── pages/
+│
+├── core/
+│   ├── analytics/
+│   ├── clustering/
+│   ├── modeling/
+│   ├── optimization/
+│   ├── statistics/
+│   └── transforms/
+│
+├── services/
+│   ├── reporting/
+│   ├── forecasting/
+│   ├── recommendations/
+│   └── autonomous/
+│
+├── data/
+│   ├── raw/
+│   ├── processed/
+│   ├── duckdb/
+│   ├── cache/
+│   └── exports/
+│
+├── pipelines/
+│
+├── visualizations/
+│
+├── configs/
+│
+├── tests/
+│
+├── requirements.txt
+│
+└── README.md
+
+
+________________
+
+
+5. Folder Responsibilities
+________________
+
+
+app.py
+Purpose
+Thin Streamlit entry point.
+Responsibilities:
+* initialize app,
+* configure navigation,
+* bootstrap state,
+* call page modules.
+Must NOT contain:
+* analytical logic,
+* transformations,
+* clustering,
+* modeling code.
+________________
+
+
+pages/
+Purpose
+Streamlit UI pages only.
+Responsibilities:
+* rendering,
+* widgets,
+* controls,
+* page orchestration,
+* calling analytical functions.
+Allowed:
+* Streamlit code,
+* Plotly rendering,
+* user interaction logic.
+Forbidden:
+* heavy analytics,
+* business logic,
+* mathematical implementations.
+Pages should call reusable functions from core/.
+________________
+
+
+core/
+Purpose
+Pure analytical engine.
+CRITICAL:
+NO `import streamlit`
+
+
+This folder must remain fully UI-independent.
+________________
+
+
+core/analytics/
+Purpose
+High-level analytical workflows.
+Examples:
+* pricing analysis,
+* basket analysis,
+* anomaly workflows,
+* dashboard metrics,
+* summary generation.
+This layer combines outputs from:
+* clustering,
+* modeling,
+* optimization,
+* statistics.
+________________
+
+
+core/clustering/
+Purpose
+Segmentation and grouping logic.
+Examples:
+* K-Means,
+* Octant clustering,
+* UMAP,
+* similarity metrics,
+* embedding operations.
+________________
+
+
+core/modeling/
+Purpose
+Predictive and mathematical models.
+Examples:
+* regression,
+* PCA,
+* forecasting,
+* fitting,
+* mathematical surfaces.
+________________
+
+
+core/optimization/
+Purpose
+Decision-making and recommendation logic.
+Examples:
+* pricing optimization,
+* inventory optimization,
+* scenario analysis,
+* recommendation generation.
+This layer answers:
+"What should be done?"
+
+
+________________
+
+
+core/statistics/
+Purpose
+Reusable statistical utilities.
+Examples:
+* correlations,
+* distributions,
+* rolling metrics,
+* error metrics,
+* z-scores,
+* statistical validation.
+This layer should remain generic and reusable.
+________________
+
+
+core/transforms/
+Purpose
+Pure dataframe transformation logic.
+Examples:
+* normalization,
+* aggregation,
+* reshaping,
+* feature engineering,
+* cleaning,
+* validation.
+CRITICAL:
+* no file loading,
+* no DB calls,
+* no UI,
+* no orchestration.
+Transforms must be:
+* deterministic,
+* stateless,
+* reusable.
+________________
+
+
+services/
+Purpose
+Future business-intelligence services.
+This layer prepares Phase 2 functionality.
+Examples:
+* automated reporting,
+* forecasting services,
+* recommendation engines,
+* autonomous analytical agents.
+Initially may remain partially empty.
+________________
+
+
+data/
+Purpose
+Persistence layer.
+Responsibilities:
+* CSV storage,
+* parquet storage,
+* DuckDB connections,
+* cache management,
+* exports.
+This layer owns:
+storage and retrieval
+
+
+NOT analytics.
+________________
+
+
+pipelines/
+Purpose
+Workflow orchestration.
+Responsibilities:
+* ingestion pipelines,
+* scheduled workflows,
+* ETL execution,
+* automation sequencing.
+Pipelines orchestrate:
+* transforms,
+* modeling,
+* clustering,
+* storage.
+Pipelines DO NOT own analytical logic.
+________________
+
+
+visualizations/
+Purpose
+Reusable chart-generation layer.
+Responsibilities:
+* Plotly figures,
+* chart templates,
+* visual formatting,
+* reusable dashboards.
+This prevents chart logic from polluting analytics.
+________________
+
+
+configs/
+Purpose
+Configuration and environment management.
+Examples:
+* constants,
+* feature flags,
+* environment variables,
+* analytical settings,
+* thresholds.
+________________
+
+
+tests/
+Purpose
+Validation and analytical correctness.
+All critical analytical functions should eventually have tests.
+Priority targets:
+* transforms,
+* optimization,
+* statistics,
+* modeling functions.
+________________
+
+
+6. Dependency Rules
+Correct dependency direction:
+data
+    ↓
+transforms
+    ↓
+statistics/modeling/clustering
+    ↓
+optimization
+    ↓
+analytics
+    ↓
+services/UI/API
+
+
+Pipelines orchestrate across layers.
+________________
+
+
+7. Streamlit Development Rules
+Streamlit must remain thin
+GOOD:
+results = run_price_optimization(df)
+st.plotly_chart(results.chart)
+
+
+BAD:
+# giant analytical logic directly inside Streamlit page
+
+
+________________
+
+
+8. AI Development Instructions (Copilot / Claude)
+________________
+
+
+General Rules
+The repository must remain:
+* modular,
+* domain-separated,
+* low-coupling,
+* highly reusable.
+AI-generated code should prioritize:
+* clarity,
+* composability,
+* analytical correctness,
+* scalability.
+________________
+
+
+Mandatory Copilot Instructions
+DO NOT:
+* mix Streamlit and analytics,
+* create giant utility files,
+* create god classes,
+* place business logic inside pages/,
+* create circular dependencies,
+* duplicate analytical functions,
+* tightly couple storage with transforms.
+________________
+
+
+ALWAYS:
+* create reusable pure functions,
+* separate orchestration from computation,
+* keep files reasonably small,
+* use type hints,
+* prefer dataclasses or Pydantic models for structured outputs,
+* write deterministic analytical functions,
+* keep visualization isolated.
+________________
+
+
+Preferred Coding Style
+Functions should:
+* do one thing,
+* remain testable,
+* avoid hidden state,
+* avoid global mutation.
+________________
+
+
+Preferred Analytical Pattern
+GOOD:
+load data
+    ↓
+transform
+    ↓
+model
+    ↓
+optimize
+    ↓
+visualize
+
+
+BAD:
+UI
+    ↔
+analytics
+    ↔
+storage
+    ↔
+charts
+    ↔
+transforms
+
+
+________________
+
+
+File Size Guidance
+Preferred:
+* 100–400 lines per file.
+Avoid:
+* 1000+ line modules.
+When complexity grows:
+* split into domain modules.
+________________
+
+
+Naming Rules
+GOOD:
+run_kmeans()
+build_features()
+find_optimal_price()
+compute_correlations()
+
+
+BAD:
+doStuff()
+calculateThing()
+processData()
+
+
+Use business-meaningful names.
+________________
+
+
+9. Phase 2 Migration Goal (Future SaaS)
+Phase 1 is intentionally structured to allow direct migration into a production-grade SaaS architecture.
+The analytical engine must remain reusable without rewriting.
+________________
+
+
+Planned Phase 2 Stack
+Frontend
+* Next.js
+* React
+* TypeScript
+* Tailwind
+Backend
+* FastAPI
+* Pydantic
+* SQLAlchemy
+Database
+* PostgreSQL
+* TimescaleDB
+Analytical Engine
+* DuckDB
+Caching / Messaging
+* Redis
+Orchestration
+* Prefect or Temporal
+Storage
+* S3 / Cloudflare R2
+AI / ML
+* scikit-learn
+* PyTorch (future)
+Reporting
+* automated PDF/HTML report generation
+* AI-generated summaries
+* autonomous recommendations
+________________
+
+
+10. Phase 2 Migration Strategy
+The following folders should migrate almost directly into backend services:
+core/
+services/
+pipelines/
+data/
+
+
+Future architecture:
+Next.js Frontend
+        ↓
+FastAPI API Layer
+        ↓
+Analytical Core Services
+        ↓
+Pipelines / Workers
+        ↓
+Storage & Databases
+
+
+Because analytical logic is isolated from UI:
+* migration complexity remains low,
+* technical debt stays manageable,
+* AI-assisted refactoring remains effective.
+________________
+
+
+11. Primary Long-Term Objective
+The application is NOT intended to remain:
+* a dashboard,
+* a simple visualization tool,
+* a Streamlit app.
+The long-term goal is:
+Analytical Intelligence Platform
+
+
+including:
+* autonomous analysis,
+* optimization,
+* forecasting,
+* recommendations,
+* AI-assisted insights,
+* report generation,
+* scalable SaaS infrastructure.

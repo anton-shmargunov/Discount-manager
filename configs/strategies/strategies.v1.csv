@@ -61,7 +61,7 @@ min,0,Conservative
 
 [discount.mtost_strategy]
 enabled,true
-balance,2%
+balance,1%
 
 [discount.mtost_bins]
 lower_dMtoSt_QW,dDiscount

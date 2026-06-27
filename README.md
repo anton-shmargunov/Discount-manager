@@ -26,6 +26,15 @@ Then open [http://localhost:8501](http://localhost:8501) in your browser.
 
 ---
 
+## Documentation
+
+| Document | Audience |
+|---|---|
+| [docs/user-manual.md](docs/user-manual.md) | Analysts and operators — workflows, Week Discount, exports |
+| [docs/architecture.md](docs/architecture.md) | Developers — modules, data flow, session state, extension points |
+
+---
+
 ## Input CSV Format
 
 Each of the four required CSV files must have:

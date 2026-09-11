@@ -928,6 +928,29 @@ DISCOUNT_HIST_EXPORT_COLUMNS: list[str] = [
     "Prom, none",
 ]
 
+# Discount / prom value columns only (exclude week + basket metadata).
+DISCOUNT_HIST_VALUE_COLUMNS: list[str] = [
+    col for col in DISCOUNT_HIST_EXPORT_COLUMNS
+    if col not in {
+        "quadweek",
+        "year_week",
+        "week from y_w (1_52)",
+        "week in quad (1_4)",
+        "",
+        "basket",
+    }
+]
+
+# Preferred category order when combining Product BS exports.
+DISCOUNT_HIST_CATEGORY_ORDER: list[str] = [
+    "Aggregated",
+    "In",
+    "Out",
+    "OutByCondition",
+    "OutByMinPrice",
+    "none",
+]
+
 
 def _parse_year_week_parts(year_week: str) -> tuple[int, int, str]:
     """Return (year, week_number, separator) from strings like 2026-25 or 2026_25."""
@@ -1129,6 +1152,145 @@ def merge_discount_hist_export(
         ),
     )
     return merged
+
+
+def _is_blank_discount_hist_value(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    text = str(value).strip()
+    return not text or text.lower() in {"n/a", "na", "nan"}
+
+
+def _prefer_discount_hist_value(current: object, incoming: object) -> object:
+    """Keep non-blank values; later files overwrite earlier non-blank values."""
+    if _is_blank_discount_hist_value(incoming):
+        return "" if _is_blank_discount_hist_value(current) else current
+    return incoming
+
+
+def merge_discount_hist_dataframes(
+    dataframes: list[pd.DataFrame],
+) -> pd.DataFrame:
+    """
+    Aggregate one or more discount-history CSVs into a single wide table.
+
+    Rows are keyed by ``(year_week, basket)``. Non-empty discount/prom cells from
+    later files overwrite earlier ones for the same key/column. Metadata for a
+    key is taken from the first non-empty source, updated when a later file
+    supplies the same key.
+    """
+    if not dataframes:
+        return pd.DataFrame(columns=DISCOUNT_HIST_EXPORT_COLUMNS)
+
+    merged_by_key: dict[tuple[str, str], dict[str, object]] = {}
+    for df in dataframes:
+        if df is None or df.empty:
+            continue
+        report = normalize_csv_df(df)
+        for _, row in report.iterrows():
+            hist_row = _source_row_to_discount_hist_export(row)
+            if hist_row is None:
+                continue
+            key = (str(hist_row["year_week"]), str(hist_row["basket"]))
+            if key not in merged_by_key:
+                merged_by_key[key] = hist_row
+                continue
+            existing = merged_by_key[key]
+            for col in DISCOUNT_HIST_EXPORT_COLUMNS:
+                if col in {"year_week", "basket"}:
+                    continue
+                if col in DISCOUNT_HIST_VALUE_COLUMNS:
+                    existing[col] = _prefer_discount_hist_value(
+                        existing.get(col),
+                        hist_row.get(col),
+                    )
+                elif _is_blank_discount_hist_value(existing.get(col)) and not (
+                    _is_blank_discount_hist_value(hist_row.get(col))
+                ):
+                    existing[col] = hist_row[col]
+
+    if not merged_by_key:
+        return pd.DataFrame(columns=DISCOUNT_HIST_EXPORT_COLUMNS)
+
+    rows = list(merged_by_key.values())
+    rows.sort(
+        key=lambda r: (
+            str(r.get("year_week", "")),
+            len(str(r.get("basket", ""))),
+            str(r.get("basket", "")),
+        ),
+    )
+    return pd.DataFrame(rows, columns=DISCOUNT_HIST_EXPORT_COLUMNS)
+
+
+def combine_discount_hist_export_by_category(
+    category_rows: dict[str, list[dict]],
+) -> list[dict]:
+    """
+    Combine per–Product-BS-category export row lists into one row per basket.
+
+    Each category list should already use the shared next-week metadata.
+    Category-specific discount/prom columns are merged; blank cells do not
+    overwrite non-blank values from another category.
+    """
+    if not category_rows:
+        return []
+
+    ordered_categories = [
+        cat for cat in DISCOUNT_HIST_CATEGORY_ORDER if cat in category_rows
+    ]
+    ordered_categories.extend(
+        sorted(cat for cat in category_rows if cat not in DISCOUNT_HIST_CATEGORY_ORDER)
+    )
+
+    combined_by_basket: dict[str, dict[str, object]] = {}
+    for category in ordered_categories:
+        if category not in DISCOUNT_HIST_DISCOUNT_COLUMNS:
+            raise ValueError(
+                f"Unknown discount history category {category!r}. "
+                f"Expected: {', '.join(sorted(DISCOUNT_HIST_DISCOUNT_COLUMNS))}."
+            )
+        discount_col = DISCOUNT_HIST_DISCOUNT_COLUMNS[category]
+        prom_col = DISCOUNT_HIST_PROM_COLUMNS[category]
+        for row in category_rows.get(category) or []:
+            basket = str(row.get("basket", "")).strip()
+            if not basket:
+                continue
+            if basket not in combined_by_basket:
+                base = {col: "" for col in DISCOUNT_HIST_EXPORT_COLUMNS}
+                for meta_col in (
+                    "quadweek",
+                    "year_week",
+                    "week from y_w (1_52)",
+                    "week in quad (1_4)",
+                    "",
+                    "basket",
+                ):
+                    base[meta_col] = row.get(meta_col, "")
+                base["basket"] = basket
+                combined_by_basket[basket] = base
+            target = combined_by_basket[basket]
+            for col in (discount_col, prom_col):
+                target[col] = _prefer_discount_hist_value(
+                    target.get(col),
+                    row.get(col),
+                )
+            for meta_col in (
+                "quadweek",
+                "year_week",
+                "week from y_w (1_52)",
+                "week in quad (1_4)",
+            ):
+                if _is_blank_discount_hist_value(target.get(meta_col)) and not (
+                    _is_blank_discount_hist_value(row.get(meta_col))
+                ):
+                    target[meta_col] = row[meta_col]
+
+    rows = list(combined_by_basket.values())
+    rows.sort(key=lambda r: (len(str(r.get("basket", ""))), str(r.get("basket", ""))))
+    return rows
 
 
 def _parse_discount_hist_discount_value(raw: object) -> float:

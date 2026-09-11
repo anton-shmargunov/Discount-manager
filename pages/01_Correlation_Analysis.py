@@ -28,8 +28,10 @@ from core.analytics.basket_analysis import (
 )
 from core.analytics.week_basket_tables import compute_basket_week_detail_rows
 from ui.week_discount_ui import render_week_discount_section
+from ui.project_save_ui import apply_pending_project_restore, render_sidebar_project_panel
 from ui.product_bs_scope import (
     AGGREGATED_DISCOUNT_HIST_CATEGORY,
+    PRODUCT_BS_CATEGORY_OPTIONS,
     PRODUCT_BS_INPUT_MODES,
     PRODUCT_BS_MONTHLY_AV_MODE,
     PRODUCT_BS_ON_DATE_MODE,
@@ -39,6 +41,7 @@ from ui.product_bs_scope import (
     product_bs_scope_key,
     scoped_widget_key,
 )
+from core.transforms.data_prep import merge_discount_hist_dataframes
 from core.models import BasketTimeSeries, Planefit, Linefit
 from core.modeling.regression import fit_plane, fit_line
 from core.optimization.price_optimization import (
@@ -548,12 +551,38 @@ def _apply_optional_discount_hist(
     discount_category: str,
     log_lines: list[str],
 ) -> pd.DataFrame | None:
-    """Load optional discount history CSV and merge discount/prom into basket data."""
+    """Load optional discount history CSV(s) and merge discount/prom into basket data.
+
+    Accepts a single uploaded file, a list of files, or None. Multiple files are
+    aggregated by ``(year_week, basket)`` before applying the active category.
+    """
     if file_discount_hist is None:
         init_discount_prom_on_basket_data(basket_data)
         return None
-    df_discount_hist = pd.read_csv(io.BytesIO(file_discount_hist.read()))
-    log_lines.append(f"Discount history rows uploaded: {len(df_discount_hist)}")
+
+    uploads = (
+        list(file_discount_hist)
+        if isinstance(file_discount_hist, (list, tuple))
+        else [file_discount_hist]
+    )
+    if not uploads:
+        init_discount_prom_on_basket_data(basket_data)
+        return None
+
+    frames: list[pd.DataFrame] = []
+    for upload in uploads:
+        frames.append(pd.read_csv(io.BytesIO(upload.read())))
+
+    if len(frames) == 1:
+        df_discount_hist = frames[0]
+        log_lines.append(f"Discount history rows uploaded: {len(df_discount_hist)}")
+    else:
+        df_discount_hist = merge_discount_hist_dataframes(frames)
+        log_lines.append(
+            f"Discount history files uploaded: {len(frames)} "
+            f"(aggregated to {len(df_discount_hist)} basket-week rows)"
+        )
+
     log_lines.append(f"Discount history category: {discount_category}")
     log_lines.extend(
         apply_discount_hist_to_basket_data(
@@ -748,6 +777,10 @@ def _init_state() -> None:
 
 _init_state()
 ss = st.session_state
+apply_pending_project_restore()
+
+with st.sidebar:
+    render_sidebar_project_panel()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Header
@@ -797,16 +830,19 @@ else:
 
 discount_hist_help = (
     "Optional weekly discount and promotion by basket. "
+    "Upload one combined CSV and/or multiple per-category CSVs — they are "
+    "aggregated by basket-week before Build. "
     + (
         "Uses aggregate columns: discount, prom with stock (no In/Out split)."
         if input_mode == TRACKING_REPORT_MODE
-        else "Columns depend on Product BS category."
+        else "Columns depend on Product BS category (or all categories if combined)."
     )
 )
 file_discount_hist = st.file_uploader(
     "📄 Discount history (discount + prom)",
     type="csv",
     key="fu_discount_hist",
+    accept_multiple_files=True,
     help=discount_hist_help,
 )
 
@@ -863,7 +899,7 @@ if input_mode in PRODUCT_BS_INPUT_MODES:
     st.markdown("**Product BS Category**")
     product_bs_category = st.selectbox(
         "Product BS Category",
-        ["Aggregated", "In", "Out", "OutByCondition", "OutByMinPrice", "none"],
+        PRODUCT_BS_CATEGORY_OPTIONS,
         index=0,
         label_visibility="collapsed",
         key="fi_product_bs_category",
@@ -2130,6 +2166,7 @@ if scope["selected_week"] and scope["selected_week"] in result.weekly_totals:
             pbs_scope_key,
             discount_hist_category,
             pbs_scope.get("discount_hist_df"),
+            input_mode=input_mode,
         )
 
     with st.expander(f"📅 Week Visualization: {selected_week}", expanded=False):

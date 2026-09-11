@@ -56,7 +56,12 @@ from core.analytics.week_basket_tables import (
     week_discount_value_kind,
 )
 from configs.settings import FULL_BASKET_LIST_PATH, STRATEGIES_V1_PATH
-from ui.product_bs_scope import scoped_widget_key
+from ui.product_bs_scope import (
+    PRODUCT_BS_INPUT_MODES,
+    iter_built_product_bs_scopes,
+    product_bs_scope_key,
+    scoped_widget_key,
+)
 from core.models import BasketTimeSeries, WeeklyTotal
 from core.transforms.data_prep import (
     DISCOUNT_HIST_DISCOUNT_COLUMNS,
@@ -64,6 +69,8 @@ from core.transforms.data_prep import (
     DISCOUNT_HIST_PROM_COLUMNS,
     advance_discount_hist_week_metadata,
     build_discount_hist_export_rows,
+    combine_discount_hist_export_by_category,
+    merge_discount_hist_dataframes,
     merge_discount_hist_export,
     parse_full_basket_list,
 )
@@ -614,6 +621,73 @@ def _manual_overrides_from_edit_df(
     return overrides
 
 
+def _category_week_discount_hist_export_rows(
+    analysis,
+    selected_week: str,
+    category: str,
+    week_meta: dict[str, object],
+    ss,
+    scope_key: str,
+    *,
+    include_no_stock: bool,
+    full_basket_list: list[str],
+) -> list[dict]:
+    """Build discount-history export rows for one built Product BS category."""
+    basket_data = analysis.basket_data
+    weekly_totals = analysis.weekly_totals
+    all_weeks = analysis.all_weeks
+    base_rows, week_discount_columns = compute_basket_week_discount_rows(
+        basket_data,
+        weekly_totals,
+        all_weeks,
+        selected_week,
+    )
+    if not base_rows:
+        return []
+    week_discount_meta = build_week_discount_column_meta(
+        weekly_totals,
+        all_weeks,
+        selected_week,
+    )
+    filter_map = week_discount_filter_columns(week_discount_meta)
+    gen_discount = ss.get(scoped_widget_key(scope_key, f"wd_generated_discount_{selected_week}"))
+    gen_prom = ss.get(scoped_widget_key(scope_key, f"wd_generated_prom_{selected_week}"))
+    manual = ss.get(scoped_widget_key(scope_key, f"wd_manual_overrides_{selected_week}"))
+    working_rows = build_working_week_discount_rows(
+        base_rows,
+        filter_map,
+        generated_discount=gen_discount if isinstance(gen_discount, dict) else None,
+        generated_prom=gen_prom if isinstance(gen_prom, dict) else None,
+        manual_overrides=manual if isinstance(manual, dict) else None,
+    )
+    export_rows = working_rows
+    in_stock_baskets = {
+        str(row.get("Basket", ""))
+        for row in working_rows
+        if str(row.get("Basket", ""))
+    }
+    if include_no_stock and full_basket_list:
+        export_rows = expand_week_discount_export_rows(
+            working_rows,
+            week_discount_columns,
+            full_basket_list,
+        )
+    export_rows = normalize_week_discount_export_rows(
+        export_rows,
+        week_discount_columns,
+        fill_baskets=(
+            in_stock_baskets
+            if include_no_stock and full_basket_list
+            else None
+        ),
+    )
+    return build_discount_hist_export_rows(
+        export_rows,
+        week_meta,
+        category,
+    )
+
+
 def render_week_discount_section(
     basket_data: dict[str, BasketTimeSeries],
     weekly_totals: dict[str, WeeklyTotal],
@@ -622,24 +696,33 @@ def render_week_discount_section(
     scope_key: str,
     discount_hist_category: str,
     discount_hist_df: pd.DataFrame | None = None,
+    input_mode: str | None = None,
 ) -> None:
     """Render Week Discount toggles, filters, strategy, table, and sum-up metrics."""
-    week_discount_rows, week_discount_columns = compute_basket_week_discount_rows(
-        basket_data,
-        weekly_totals,
-        all_weeks,
-        selected_week,
-    )
-    if not week_discount_rows:
-        st.info("No basket rows for the selected week.")
-        return
+    progress = st.progress(0, text="Preparing Week Discount…")
+    try:
+        progress.progress(20, text="Computing Week Discount rows…")
+        week_discount_rows, week_discount_columns = compute_basket_week_discount_rows(
+            basket_data,
+            weekly_totals,
+            all_weeks,
+            selected_week,
+        )
+        if not week_discount_rows:
+            progress.empty()
+            st.info("No basket rows for the selected week.")
+            return
 
-    week_discount_meta = build_week_discount_column_meta(
-        weekly_totals,
-        all_weeks,
-        selected_week,
-    )
-    week_discount_filter_map = week_discount_filter_columns(week_discount_meta)
+        progress.progress(40, text="Building column metadata…")
+        week_discount_meta = build_week_discount_column_meta(
+            weekly_totals,
+            all_weeks,
+            selected_week,
+        )
+        week_discount_filter_map = week_discount_filter_columns(week_discount_meta)
+    except Exception:
+        progress.empty()
+        raise
     ss = st.session_state
 
     def wk(widget_key: str) -> str:
@@ -717,20 +800,24 @@ def render_week_discount_section(
     manual_edit_key = wk(f"wd_manual_edit_{selected_week}")
     manual_revision_key = wk(f"wd_manual_revision_{selected_week}")
 
+    progress.progress(65, text="Applying discounts / promotions…")
     manual_overrides = ss.get(manual_overrides_key, {})
-    working_rows = build_working_week_discount_rows(
-        week_discount_rows,
-        week_discount_filter_map,
-        generated_discount=ss.get(generated_discount_key)
-        if generated_discount_key in ss and ss[generated_discount_key]
-        else None,
-        generated_prom=ss.get(generated_prom_key)
-        if generated_prom_key in ss and ss[generated_prom_key]
-        else None,
-        manual_overrides=manual_overrides if manual_overrides else None,
-    )
-
-    filtered_rows = apply_week_discount_filters(working_rows, filter_bounds)
+    try:
+        working_rows = build_working_week_discount_rows(
+            week_discount_rows,
+            week_discount_filter_map,
+            generated_discount=ss.get(generated_discount_key)
+            if generated_discount_key in ss and ss[generated_discount_key]
+            else None,
+            generated_prom=ss.get(generated_prom_key)
+            if generated_prom_key in ss and ss[generated_prom_key]
+            else None,
+            manual_overrides=manual_overrides if manual_overrides else None,
+        )
+        filtered_rows = apply_week_discount_filters(working_rows, filter_bounds)
+    except Exception:
+        progress.empty()
+        raise
     filter_state_key = "_".join(
         f"{col}:{lo}:{hi}" for col, (lo, hi) in sorted(filter_bounds.items())
     )
@@ -758,19 +845,23 @@ def render_week_discount_section(
         use_container_width=True,
     )
     if generate_discount_clicked:
+        progress.progress(80, text="Generating discounts…")
         ss[generated_discount_key] = generate_week_discount_values(
             week_discount_rows,
             week_discount_meta,
             week_discount_filter_map,
             strategy_settings,
         )
+        progress.empty()
         st.rerun()
     if generate_prom_clicked:
+        progress.progress(80, text="Generating promotions…")
         ss[generated_prom_key] = generate_week_prom_values(
             week_discount_rows,
             week_discount_filter_map,
             prom_settings,
         )
+        progress.empty()
         st.rerun()
 
     if edit_mode:
@@ -796,6 +887,7 @@ def render_week_discount_section(
             use_container_width=True,
         )
         if edit_clicked:
+            progress.empty()
             ss[manual_edit_key] = True
             ss.pop(wk(f"wd_manual_editor_{selected_week}"), None)
             st.rerun()
@@ -803,136 +895,17 @@ def render_week_discount_section(
         cancel_clicked = False
 
     if not visible_columns:
+        progress.empty()
         st.info("Enable at least one column group to show the table.")
         return
 
+    progress.progress(85, text="Preparing Week Discount table…")
     df_week_discount = pd.DataFrame(filtered_rows, columns=week_discount_columns)
     df_week_discount = df_week_discount.loc[:, visible_columns]
 
-    full_basket_list = _load_full_basket_list()
-    include_no_stock = True
-    export_all_history = True
-    export_col, hist_export_col, opts_col = st.columns(
-        [_btn_w, _btn_w, _btn_pad - _btn_w],
-    )
-    with opts_col:
-        opt_left, opt_right = st.columns(2)
-        if full_basket_list:
-            include_no_stock = opt_left.checkbox(
-                "Include 'no stock'",
-                value=True,
-                key=wk(f"wd_export_include_no_stock_{selected_week}"),
-                help=(
-                    "When checked, export all baskets from the canonical list "
-                    f"({len(full_basket_list)}), including those with no current stock in the import."
-                ),
-            )
-        export_all_history = opt_right.checkbox(
-            "all history",
-            value=True,
-            key=wk(f"wd_export_all_history_{selected_week}"),
-            help=(
-                "When checked, discount-history export includes the uploaded history "
-                "plus the new week settings. When unchecked, only the new week is exported."
-            ),
-        )
-    export_rows = filtered_rows
-    in_stock_baskets = {
-        str(row.get("Basket", ""))
-        for row in working_rows
-        if str(row.get("Basket", ""))
-    }
-    if include_no_stock and full_basket_list:
-        export_rows = expand_week_discount_export_rows(
-            working_rows,
-            week_discount_columns,
-            full_basket_list,
-        )
-    export_rows = normalize_week_discount_export_rows(
-        export_rows,
-        week_discount_columns,
-        fill_baskets=(
-            in_stock_baskets
-            if include_no_stock and full_basket_list
-            else None
-        ),
-    )
-    df_export = pd.DataFrame(export_rows, columns=week_discount_columns)
-    df_export = df_export.loc[:, visible_columns]
-    export_col.download_button(
-        "Export Week Discount",
-        data=df_export.to_csv(index=False).encode(),
-        file_name=f"week_discount_{selected_week}.csv",
-        mime="text/csv",
-        disabled=df_export.empty or edit_mode,
-        use_container_width=True,
-        key=wk(
-            f"week_discount_export_{selected_week}_{view_state_key}_"
-            f"{filter_state_key}_{gen_state_key}_{prom_state_key}_"
-            f"{manual_state_key}_{int(include_no_stock)}"
-        ),
-        help=(
-            "Export visible Week Discount columns (raw numeric values). "
-            + (
-                "Includes all canonical baskets when 'Include no stock' is checked."
-                if include_no_stock and full_basket_list
-                else "Exports filtered table rows only."
-            )
-        ),
-    )
-    try:
-        next_week_meta = advance_discount_hist_week_metadata(weekly_totals, selected_week)
-    except ValueError:
-        next_week_meta = None
-    if next_week_meta is not None:
-        new_hist_rows = build_discount_hist_export_rows(
-            export_rows,
-            next_week_meta,
-            discount_hist_category,
-        )
-        hist_export_rows = merge_discount_hist_export(
-            discount_hist_df,
-            new_hist_rows,
-            include_all_history=export_all_history,
-        )
-        df_hist_export = pd.DataFrame(hist_export_rows, columns=DISCOUNT_HIST_EXPORT_COLUMNS)
-        hist_export_col.download_button(
-            "Export Discount history",
-            data=df_hist_export.to_csv(index=False).encode(),
-            file_name=f"discount_hist_{next_week_meta['year_week']}.csv",
-            mime="text/csv",
-            disabled=df_hist_export.empty or edit_mode,
-            use_container_width=True,
-            key=wk(
-                f"week_discount_hist_export_{selected_week}_{view_state_key}_"
-                f"{filter_state_key}_{gen_state_key}_{prom_state_key}_"
-                f"{manual_state_key}_{int(include_no_stock)}_{int(export_all_history)}_"
-                f"{discount_hist_category}"
-            ),
-            help=(
-                "Export New Discount / New Prom in discount-history input format "
-                f"for week {next_week_meta['year_week']} "
-                f"({DISCOUNT_HIST_DISCOUNT_COLUMNS.get(discount_hist_category, 'discount')} / "
-                f"{DISCOUNT_HIST_PROM_COLUMNS.get(discount_hist_category, 'prom with stock')}). "
-                + (
-                    "Includes full uploaded history when 'all history' is checked."
-                    if export_all_history
-                    else "Exports only the new week."
-                )
-            ),
-        )
-    else:
-        hist_export_col.button(
-            "Export Discount history",
-            disabled=True,
-            use_container_width=True,
-            help="Week metadata unavailable for discount-history export.",
-        )
     caption_parts = [f"{len(df_week_discount)} basket(s) shown"]
     if filter_bounds:
         caption_parts.append(f"filtered from {len(week_discount_rows)}")
-    if include_no_stock and full_basket_list:
-        caption_parts.append(f"{len(df_export)} in export")
     if generated_discount_key in ss and ss[generated_discount_key]:
         caption_parts.append(
             f"discount generated for {len(ss[generated_discount_key])} basket(s)"
@@ -953,6 +926,7 @@ def render_week_discount_section(
         f"{view_state_key}_{filter_state_key}_{gen_state_key}_"
         f"{prom_state_key}_{manual_state_key}"
     )
+    progress.progress(95, text="Rendering Week Discount table…")
     if edit_mode:
         editor_key = wk(f"wd_manual_editor_{selected_week}")
         edit_df = _week_discount_rows_to_edit_df(
@@ -972,10 +946,12 @@ def render_week_discount_section(
             edited_raw if isinstance(edited_raw, pd.DataFrame) else edited_raw.data
         )
         if cancel_clicked:
+            progress.empty()
             ss.pop(editor_key, None)
             ss[manual_edit_key] = False
             st.rerun()
         if apply_clicked:
+            progress.progress(98, text="Applying manual edits…")
             ss.pop(editor_key, None)
             new_overrides = _manual_overrides_from_edit_df(edited_df, visible_columns)
             merged = dict(ss.get(manual_overrides_key, {}))
@@ -995,6 +971,7 @@ def render_week_discount_section(
                 ss[generated_discount_key] = gen_disc
             ss[manual_revision_key] = manual_revision + 1
             ss[manual_edit_key] = False
+            progress.empty()
             st.rerun()
     else:
         st.dataframe(
@@ -1003,6 +980,217 @@ def render_week_discount_section(
             hide_index=True,
             key=wk(f"week_discount_table_{selected_week}_{table_state_key}"),
         )
+    progress.empty()
+
+    full_basket_list = _load_full_basket_list()
+    include_no_stock = True
+    export_all_history = True
+    enable_all_bs_export = bool(
+        input_mode is not None and input_mode in PRODUCT_BS_INPUT_MODES
+    )
+    with st.expander("Export", expanded=False):
+        if enable_all_bs_export:
+            export_col, hist_export_col, hist_all_col, opts_col = st.columns(
+                [_btn_w, _btn_w, _btn_w, max(_btn_pad - 2 * _btn_w, 1)],
+            )
+        else:
+            hist_all_col = None
+            export_col, hist_export_col, opts_col = st.columns(
+                [_btn_w, _btn_w, _btn_pad - _btn_w],
+            )
+        with opts_col:
+            opt_left, opt_right = st.columns(2)
+            if full_basket_list:
+                include_no_stock = opt_left.checkbox(
+                    "Include 'no stock'",
+                    value=True,
+                    key=wk(f"wd_export_include_no_stock_{selected_week}"),
+                    help=(
+                        "When checked, export all baskets from the canonical list "
+                        f"({len(full_basket_list)}), including those with no current stock in the import."
+                    ),
+                )
+            export_all_history = opt_right.checkbox(
+                "all history",
+                value=True,
+                key=wk(f"wd_export_all_history_{selected_week}"),
+                help=(
+                    "When checked, discount-history export includes the uploaded history "
+                    "plus the new week settings. When unchecked, only the new week is exported."
+                ),
+            )
+        export_rows = filtered_rows
+        in_stock_baskets = {
+            str(row.get("Basket", ""))
+            for row in working_rows
+            if str(row.get("Basket", ""))
+        }
+        if include_no_stock and full_basket_list:
+            export_rows = expand_week_discount_export_rows(
+                working_rows,
+                week_discount_columns,
+                full_basket_list,
+            )
+        export_rows = normalize_week_discount_export_rows(
+            export_rows,
+            week_discount_columns,
+            fill_baskets=(
+                in_stock_baskets
+                if include_no_stock and full_basket_list
+                else None
+            ),
+        )
+        df_export = pd.DataFrame(export_rows, columns=week_discount_columns)
+        df_export = df_export.loc[:, visible_columns]
+        if include_no_stock and full_basket_list:
+            st.caption(f"{len(df_export)} basket(s) in Week Discount export")
+        export_col.download_button(
+            "Week Discount",
+            data=df_export.to_csv(index=False).encode(),
+            file_name=f"week_discount_{selected_week}.csv",
+            mime="text/csv",
+            disabled=df_export.empty or edit_mode,
+            use_container_width=True,
+            key=wk(
+                f"week_discount_export_{selected_week}_{view_state_key}_"
+                f"{filter_state_key}_{gen_state_key}_{prom_state_key}_"
+                f"{manual_state_key}_{int(include_no_stock)}"
+            ),
+            help=(
+                "Export visible Week Discount columns (raw numeric values). "
+                + (
+                    "Includes all canonical baskets when 'Include no stock' is checked."
+                    if include_no_stock and full_basket_list
+                    else "Exports filtered table rows only."
+                )
+            ),
+        )
+        try:
+            next_week_meta = advance_discount_hist_week_metadata(
+                weekly_totals, selected_week
+            )
+        except ValueError:
+            next_week_meta = None
+        if next_week_meta is not None:
+            new_hist_rows = build_discount_hist_export_rows(
+                export_rows,
+                next_week_meta,
+                discount_hist_category,
+            )
+            hist_export_rows = merge_discount_hist_export(
+                discount_hist_df,
+                new_hist_rows,
+                include_all_history=export_all_history,
+            )
+            df_hist_export = pd.DataFrame(
+                hist_export_rows, columns=DISCOUNT_HIST_EXPORT_COLUMNS
+            )
+            hist_export_col.download_button(
+                "Discount history. Current",
+                data=df_hist_export.to_csv(index=False).encode(),
+                file_name=f"discount_hist_{next_week_meta['year_week']}.csv",
+                mime="text/csv",
+                disabled=df_hist_export.empty or edit_mode,
+                use_container_width=True,
+                key=wk(
+                    f"week_discount_hist_export_{selected_week}_{view_state_key}_"
+                    f"{filter_state_key}_{gen_state_key}_{prom_state_key}_"
+                    f"{manual_state_key}_{int(include_no_stock)}_{int(export_all_history)}_"
+                    f"{discount_hist_category}"
+                ),
+                help=(
+                    "Export New Discount / New Prom in discount-history input format "
+                    f"for week {next_week_meta['year_week']} "
+                    f"({DISCOUNT_HIST_DISCOUNT_COLUMNS.get(discount_hist_category, 'discount')} / "
+                    f"{DISCOUNT_HIST_PROM_COLUMNS.get(discount_hist_category, 'prom with stock')}). "
+                    + (
+                        "Includes full uploaded history when 'all history' is checked."
+                        if export_all_history
+                        else "Exports only the new week."
+                    )
+                ),
+            )
+            if hist_all_col is not None and input_mode is not None:
+                built_scopes = iter_built_product_bs_scopes(ss, input_mode)
+                category_rows: dict[str, list[dict]] = {}
+                hist_sources: list[pd.DataFrame] = []
+                for category, cat_scope in built_scopes:
+                    analysis = cat_scope.get("analysis")
+                    if analysis is None:
+                        continue
+                    cat_key = product_bs_scope_key(input_mode, category)
+                    cat_hist = _category_week_discount_hist_export_rows(
+                        analysis,
+                        selected_week,
+                        category,
+                        next_week_meta,
+                        ss,
+                        cat_key,
+                        include_no_stock=include_no_stock,
+                        full_basket_list=full_basket_list,
+                    )
+                    if cat_hist:
+                        category_rows[category] = cat_hist
+                    src_df = cat_scope.get("discount_hist_df")
+                    if isinstance(src_df, pd.DataFrame) and not src_df.empty:
+                        hist_sources.append(src_df)
+                combined_new = combine_discount_hist_export_by_category(category_rows)
+                combined_source = (
+                    merge_discount_hist_dataframes(hist_sources)
+                    if hist_sources
+                    else None
+                )
+                all_hist_rows = merge_discount_hist_export(
+                    combined_source
+                    if combined_source is not None and not combined_source.empty
+                    else None,
+                    combined_new,
+                    include_all_history=export_all_history,
+                )
+                df_all_hist = pd.DataFrame(
+                    all_hist_rows, columns=DISCOUNT_HIST_EXPORT_COLUMNS
+                )
+                built_labels = (
+                    ", ".join(category_rows.keys()) if category_rows else "none"
+                )
+                hist_all_col.download_button(
+                    "Discount history. All",
+                    data=df_all_hist.to_csv(index=False).encode(),
+                    file_name=(
+                        f"discount_hist_all_bs_{next_week_meta['year_week']}.csv"
+                    ),
+                    mime="text/csv",
+                    disabled=df_all_hist.empty or edit_mode or not category_rows,
+                    use_container_width=True,
+                    key=wk(
+                        f"week_discount_hist_export_all_bs_{selected_week}_"
+                        f"{view_state_key}_{filter_state_key}_{gen_state_key}_"
+                        f"{prom_state_key}_{manual_state_key}_"
+                        f"{int(include_no_stock)}_{int(export_all_history)}_"
+                        f"{len(category_rows)}"
+                    ),
+                    help=(
+                        "Combine New Discount / New Prom from every Product BS Category "
+                        f"already built in this session ({built_labels}) into one "
+                        f"discount-history file for week {next_week_meta['year_week']}. "
+                        "Build and generate/edit each category before exporting."
+                    ),
+                )
+        else:
+            hist_export_col.button(
+                "Discount history. Current",
+                disabled=True,
+                use_container_width=True,
+                help="Week metadata unavailable for discount-history export.",
+            )
+            if hist_all_col is not None:
+                hist_all_col.button(
+                    "Discount history. All",
+                    disabled=True,
+                    use_container_width=True,
+                    help="Week metadata unavailable for discount-history export.",
+                )
+
     summary = compute_week_discount_summary(
         filtered_rows,
         week_discount_filter_map,

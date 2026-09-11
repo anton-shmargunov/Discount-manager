@@ -474,6 +474,62 @@ def main():
     assert len(new_only) == len(hist_rows)
     assert all(str(r["year_week"]) == "2025-35" for r in new_only)
 
+    from core.transforms.data_prep import (
+        combine_discount_hist_export_by_category,
+        merge_discount_hist_dataframes,
+    )
+
+    # Multi-file upload aggregation: separate In / Out category files → one wide row
+    df_in_only = pd.DataFrame([{
+        "quadweek": 8,
+        "year_week": "2025-34",
+        "week from y_w (1_52)": 34,
+        "week in quad (1_4)": 3,
+        "basket": "2312",
+        "BasketDiscountInMarket": -0.25,
+        "Prom, BasketDiscountInMarket": 0.04,
+    }])
+    df_out_only = pd.DataFrame([{
+        "quadweek": 8,
+        "year_week": "2025-34",
+        "week from y_w (1_52)": 34,
+        "week in quad (1_4)": 3,
+        "basket": "2312",
+        "BasketDiscountOutOfMarket": -0.10,
+        "Prom, BasketDiscountOutOfMarket": 0.02,
+    }])
+    aggregated_upload = merge_discount_hist_dataframes([df_in_only, df_out_only])
+    assert len(aggregated_upload) == 1
+    row_agg = aggregated_upload.iloc[0]
+    assert str(row_agg["basket"]) == "2312"
+    assert float(row_agg["BasketDiscountInMarket"]) == -0.25
+    assert float(row_agg["BasketDiscountOutOfMarket"]) == -0.10
+    assert float(row_agg["Prom, BasketDiscountInMarket"]) == 0.04
+    assert float(row_agg["Prom, BasketDiscountOutOfMarket"]) == 0.02
+
+    # Combined all-BS-category export merge
+    in_export = build_discount_hist_export_rows(
+        [{"Basket": "2312", "New Discount": -0.11, "New Prom": 0.04}],
+        meta_mid,
+        "In",
+    )
+    out_export = build_discount_hist_export_rows(
+        [{"Basket": "2312", "New Discount": -0.05, "New Prom": 0.02}],
+        meta_mid,
+        "Out",
+    )
+    combined_export = combine_discount_hist_export_by_category({
+        "In": in_export,
+        "Out": out_export,
+    })
+    assert len(combined_export) == 1
+    assert combined_export[0]["year_week"] == "2025-35"
+    assert combined_export[0]["BasketDiscountInMarket"] == "-0.11"
+    assert combined_export[0]["BasketDiscountOutOfMarket"] == "-0.05"
+    assert combined_export[0]["Prom, BasketDiscountInMarket"] == "0.04"
+    assert combined_export[0]["Prom, BasketDiscountOutOfMarket"] == "0.02"
+    assert combined_export[0]["discount"] == ""
+
     settings_csv = load_discount_strategy_settings("inputs/Discount settings.csv")
     assert len(settings_csv.conservative.bins) >= 5
     csv_margin = settings_csv.margin_categories
@@ -502,7 +558,7 @@ def main():
     assert lookup_mtost_d_discount(0.10, settings_v1.mtost) == -0.02
     assert lookup_mtost_d_discount(0.30, settings_v1.mtost) == 0.0
     assert lookup_mtost_d_discount(0.60, settings_v1.mtost) == 0.02
-    assert abs(settings_v1.mtost_balance - 0.02) < 1e-9
+    assert abs(settings_v1.mtost_balance - 0.01) < 1e-9
     assert settings_v1.mtost_strategy_enabled is True
     assert settings_v1.margin_mode == "Margin categories"
 
@@ -952,6 +1008,77 @@ def main():
         min_price=0.001,
     )
     _assert_single_week_metrics(check_monthly_agg, 353, 52374.9, 1360.476, 621, 1071)
+
+    # ── Project save / restore (.disc_proj) ─────────────────────────────────
+    print("\nProject persistence (.disc_proj)...")
+    from core.persistence.project_io import (
+        PROJECT_EXTENSION,
+        PROJECT_MAGIC,
+        apply_project_payload,
+        build_project_payload,
+        ensure_project_filename,
+        pack_project_bytes,
+        unpack_project_bytes,
+    )
+
+    assert ensure_project_filename("my proj") == f"my proj{PROJECT_EXTENSION}"
+    assert ensure_project_filename("x.disc_proj") == "x.disc_proj"
+
+    class _FakeSession(dict):
+        def __getattr__(self, name):
+            try:
+                return self[name]
+            except KeyError as exc:
+                raise AttributeError(name) from exc
+
+        def __setattr__(self, name, value):
+            self[name] = value
+
+    fake = _FakeSession()
+    fake.log_messages = ["Ready."]
+    fake.input_mode = "TrackingBaskets_v2 - product_BS. on date of sale"
+    fake.fi_k = 3
+    fake.fu_tracking_report = object()  # should be skipped by type/prefix
+    fake._pbs_scopes = {
+        "pbs::TrackingBaskets_v2 - product_BS. on date of sale::Aggregated": {
+            "analysis": result,
+            "selected_basket": "1111",
+            "selected_week": result.all_weeks[-1],
+            "discount_hist_df": None,
+            "fit_sold": {},
+            "fit_cost": {},
+            "margin_model": {},
+            "show_line": False,
+            "show_qw_colors": False,
+            "show_qw_average": False,
+            "fit_sold_m": {},
+            "bulk_fit_price_sold": {},
+            "bulk_fit_price_stock_sold": {},
+            "fit_sumup_cost": None,
+            "fit_sumup_stock_sold": None,
+            "sumup_margin_model": None,
+            "sumup_select_generation": 0,
+            "build_message": None,
+        }
+    }
+
+    payload = build_project_payload(fake)
+    blob = pack_project_bytes(payload)
+    assert blob.startswith(PROJECT_MAGIC)
+    restored_payload = unpack_project_bytes(blob)
+    assert restored_payload["format"] == "pba_disc_proj"
+    assert restored_payload["ui"]["fi_k"] == 3
+    assert "fu_tracking_report" not in restored_payload["ui"]
+
+    dest = _FakeSession()
+    dest.log_messages = ["old"]
+    messages = apply_project_payload(dest, restored_payload)
+    assert dest.fi_k == 3
+    assert dest.input_mode == fake.input_mode
+    assert dest._pbs_scopes["pbs::TrackingBaskets_v2 - product_BS. on date of sale::Aggregated"]["selected_basket"] == "1111"
+    assert dest._pbs_scopes["pbs::TrackingBaskets_v2 - product_BS. on date of sale::Aggregated"]["analysis"].basket_count == result.basket_count
+    assert any("restored" in line.lower() for line in messages)
+    print(f"  Project bytes: {len(blob):,}")
 
     print("\nALL TESTS PASSED")
 

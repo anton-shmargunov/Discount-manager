@@ -20,6 +20,15 @@ PRODUCT_BS_INPUT_MODES = frozenset({
 # Discount history columns for non–product-BS report input (no In/Out split).
 AGGREGATED_DISCOUNT_HIST_CATEGORY = "Aggregated"
 
+PRODUCT_BS_CATEGORY_OPTIONS: list[str] = [
+    "Aggregated",
+    "In",
+    "Out",
+    "OutByCondition",
+    "OutByMinPrice",
+    "none",
+]
+
 
 def product_bs_scope_key(input_mode: str, product_bs_category: str) -> str:
     """Stable key for namespacing session state and widgets."""
@@ -81,3 +90,25 @@ def clear_product_bs_scope_derived(scope: dict[str, Any]) -> None:
     scope["sumup_margin_model"] = None
     scope["margin_model"] = {}
     scope["sumup_select_generation"] = 0
+
+
+def iter_built_product_bs_scopes(
+    session_state: Any,
+    input_mode: str,
+) -> list[tuple[str, dict[str, Any]]]:
+    """
+    Return ``(category, scope)`` pairs for this input mode that have a built analysis.
+
+    Order follows PRODUCT_BS_CATEGORY_OPTIONS.
+    """
+    if input_mode not in PRODUCT_BS_INPUT_MODES:
+        return []
+    scopes = getattr(session_state, "_pbs_scopes", None) or {}
+    built: list[tuple[str, dict[str, Any]]] = []
+    for category in PRODUCT_BS_CATEGORY_OPTIONS:
+        key = product_bs_scope_key(input_mode, category)
+        scope = scopes.get(key)
+        if scope is None or scope.get("analysis") is None:
+            continue
+        built.append((category, scope))
+    return built

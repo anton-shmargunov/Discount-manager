@@ -54,6 +54,7 @@ def default_product_bs_scope_state() -> dict[str, Any]:
         "fit_cost": {},
         "bulk_fit_price_sold": {},
         "bulk_fit_price_stock_sold": {},
+        "bulk_fit_cost_price": {},
         "fit_sumup_cost": None,
         "fit_sumup_stock_sold": None,
         "sumup_margin_model": None,
@@ -85,6 +86,7 @@ def clear_product_bs_scope_derived(scope: dict[str, Any]) -> None:
     scope["fit_cost"] = {}
     scope["bulk_fit_price_sold"] = {}
     scope["bulk_fit_price_stock_sold"] = {}
+    scope["bulk_fit_cost_price"] = {}
     scope["fit_sumup_cost"] = None
     scope["fit_sumup_stock_sold"] = None
     scope["sumup_margin_model"] = None

@@ -44,27 +44,26 @@ Use the navigation sidebar to access the available analysis pages.
 
 | Page | Description |
 |---|---|
-| **Correlation Analysis** | Upload datasets → compute correlations → cluster baskets → drill-down into basket & week detail → run margin optimisation model |
+| **Correlation Analysis** | Upload a TrackingBaskets report → correlations → clusters → basket & week detail → Week Discount → Project save |
 
 ---
 
 #### How to use
 
 1. Navigate to **Correlation Analysis** in the sidebar.
-2. Upload four CSV files: **SoldIn**, **AvgSalePrice_In**, **M_In**, **Stock**.
-3. Set preprocessing filters and click **Build Project**.
-4. Optionally apply **K-Means** or **Octants** clustering.
-5. Click any basket row to drill into weekly data and run regression fits.
-6. Scroll down to the **Sum-Up** section for aggregate weekly analytics.
+2. Choose an input format (**TrackingBaskets_v2 report** or **product_BS**) and upload the report CSV.
+3. Optionally upload one or more **discount history** CSVs.
+4. Set preprocessing filters and click **Build Project**.
+5. Optionally apply **K-Means** or **Octants** clustering.
+6. Click any basket row to drill into weekly data and run regression fits.
+7. In **Sum-Up**, select a week and open **Week Discount** to generate, edit, and export.
+8. Use the sidebar **Project** expander to **Save…** or **Restore** a `.disc_proj` snapshot.
 
 ---
 
 #### Expected CSV format
 
-Each CSV file must have:
-- A `year_week` column (e.g. `2024-01`).
-- A `quadweek` column (optional but recommended for trend analysis).
-- One column per basket (the basket code is the column name).
+**TrackingBaskets_v2** report (or product_BS report): weekly rows with `year_week`, `quadweek`, `basket`, and metric columns. Optional discount history uses `year_week`, `basket`, and category discount/prom columns. Column details are in the user manual (`docs/user-manual.md`).
 
 ---
 """)

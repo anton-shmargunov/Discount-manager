@@ -19,13 +19,25 @@ from core.analytics.basket_analysis import (
     apply_octants,
     compute_sumup_series,
 )
-from core.modeling.regression import fit_plane, fit_line
+from core.modeling.regression import fit_plane, fit_line, paired_values_skipping_zero_x, values_skipping_last
+from core.analytics.cost_correction import (
+    COST_CORRECTION_FROM_LAST_POINT,
+    COST_CORRECTION_FROM_REGRESSION,
+    compute_corrections_for_baskets,
+    compute_cost_margin_correction,
+    enrich_sumup_with_corrected_totals,
+    fit_bulk_cost_price,
+    hybrid_margin_map,
+    last_fitted_index,
+    skipped_tail_indices,
+)
 from core.optimization.price_optimization import evaluate_week_margin_model
-from core.statistics.metrics import monthly_reserve
+from core.statistics.metrics import monthly_reserve, ratio_series, safe_ratio
 from core.transforms.data_prep import (
     tracking_report_to_metric_frames,
     tracking_product_bs_report_to_frame_sets,
 )
+from visualizations.sumup_charts import build_metric_progress
 
 
 def main():
@@ -88,6 +100,9 @@ def main():
         first_su["total_monthly_reserve"], expected_mr
     )
     assert abs(monthly_reserve(30.0, 7.0) - 1.0) < 1e-9
+    assert math.isnan(safe_ratio(10.0, 0.0))
+    assert abs(safe_ratio(10.0, 2.0) - 5.0) < 1e-9
+    assert abs(ratio_series([10.0], [5.0])[0] - 2.0) < 1e-9
 
     from core.analytics.week_basket_tables import (
         WeekDiscountViewSettings,
@@ -113,6 +128,9 @@ def main():
     assert len(detail_rows) == result.weekly_totals[show_week].valid_baskets
     assert "Corr S/P" not in detail_rows[0]
     assert "Basket" in detail_rows[0]
+    assert "Total Margin Corrected" in detail_rows[0]
+    assert "Cost Corrected" in detail_rows[0]
+    assert abs(detail_rows[0]["Total Margin Corrected"] - detail_rows[0]["Total Margin"]) < 1e-9
     discount_rows, discount_cols = compute_basket_week_discount_rows(
         result.basket_data, result.weekly_totals, result.all_weeks, show_week,
     )
@@ -625,6 +643,159 @@ def main():
 
     pf = fit_plane(ts.price, ts.stock, ts.sold, method="mlr")
     lf = fit_line(ts.price, ts.cost)
+    skipped_price = values_skipping_last(ts.price, 4)
+    skipped_cost = values_skipping_last(ts.cost, 4)
+    assert len(skipped_price) == max(0, ts.n_weeks - 4)
+    assert len(skipped_cost) == len(skipped_price)
+    lf_skip = fit_line(skipped_price, skipped_cost)
+    assert values_skipping_last(ts.price, 0) == list(ts.price)
+    assert values_skipping_last(ts.price, ts.n_weeks) == []
+    assert values_skipping_last(ts.price, ts.n_weeks + 3) == []
+    keep_x, keep_y = paired_values_skipping_zero_x([0.0, 10.0, 0, 12.0], [1.0, 2.0, 3.0, 4.0], True)
+    assert keep_x == [10.0, 12.0]
+    assert keep_y == [2.0, 4.0]
+    all_x, all_y = paired_values_skipping_zero_x([0.0, 10.0], [1.0, 2.0], False)
+    assert all_x == [0.0, 10.0] and all_y == [1.0, 2.0]
+    if ts.n_weeks >= 6:
+        assert lf_skip is not None
+        assert math.isfinite(lf_skip.z0)
+        assert math.isfinite(lf_skip.a)
+        assert math.isfinite(lf_skip.rmse)
+        assert skipped_tail_indices(ts.n_weeks, 4) == list(range(ts.n_weeks - 4, ts.n_weeks))
+        assert last_fitted_index([1.0, 0.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], 4, True) == 4
+        corr_a = compute_cost_margin_correction(
+            ts.price, ts.cost, ts.sold, ts.m, lf_skip,
+            4, True, COST_CORRECTION_FROM_REGRESSION, 0.0, None,
+        )
+        if lf_skip.a >= 0:
+            assert corr_a.applied
+            tail = ts.n_weeks - 1
+            expected_cost = lf_skip.z0 + lf_skip.a * ts.price[tail]
+            assert abs(corr_a.cost_corrected[tail] - expected_cost) < 1e-9
+            assert math.isnan(corr_a.cost_corrected[0])
+            expected_m = ts.m[tail] + ts.sold[tail] * (ts.cost[tail] - expected_cost)
+            assert abs(corr_a.margin_hybrid[tail] - expected_m) < 1e-6
+            assert corr_a.margin_hybrid[0] == ts.m[0]
+            corr_b = compute_cost_margin_correction(
+                ts.price, ts.cost, ts.sold, ts.m, lf_skip,
+                4, True, COST_CORRECTION_FROM_LAST_POINT, 0.0, None,
+            )
+            assert corr_b.applied
+            anchor = last_fitted_index(ts.price, 4, True)
+            assert anchor is not None
+            expected_b = ts.cost[anchor] - lf_skip.a * ts.price[anchor]
+            assert abs(corr_b.intercept - expected_b) < 1e-9
+            assert abs((lf_skip.z0 / (1.0 - lf_skip.a)) - lf_skip.pl) < 1e-6 or math.isnan(lf_skip.pl)
+            blocked = compute_cost_margin_correction(
+                ts.price, ts.cost, ts.sold, ts.m, lf_skip,
+                4, True, COST_CORRECTION_FROM_REGRESSION, 1e9, None,
+            )
+            assert not blocked.applied
+        else:
+            blocked_neg = compute_cost_margin_correction(
+                ts.price, ts.cost, ts.sold, ts.m, lf_skip,
+                4, True, COST_CORRECTION_FROM_REGRESSION, 0.0, None,
+            )
+            assert not blocked_neg.applied
+
+    weeks = ["2024-01", "2024-02", "2024-03", "2024-04"]
+    orig = [10.0, 10.0, 10.0, 10.0]
+    overlay = [float("nan"), float("nan"), 20.0, 20.0]
+    qw = ["1", "1", "1", "1"]
+    fig = build_metric_progress(
+        weeks, orig,
+        title="Cost per Sold vs Week",
+        y_title="Cost per Sold",
+        marker_color="rgba(16,185,129,0.75)",
+        line_color="rgb(5,150,105)",
+        show_qw_average=True,
+        quadweeks=qw,
+        overlay_values=overlay,
+        overlay_name="Cost Corrected",
+    )
+    original_qw = [
+        t for t in fig.data
+        if t.name is None and getattr(t.line, "dash", None) == "dash"
+    ]
+    corrected_qw = [t for t in fig.data if t.name == "Corrected Average QW"]
+    assert original_qw, "Original QW average should remain"
+    assert abs(float(original_qw[0].y[0]) - 10.0) < 1e-9
+    assert corrected_qw, "Corrected Average QW should be drawn alongside original"
+    assert abs(float(corrected_qw[0].y[0]) - 15.0) < 1e-9
+    assert getattr(corrected_qw[0].line, "dash", None) == "dot"
+
+    bulk_fits = fit_bulk_cost_price(result.basket_data, 4, True)
+    assert bulk_fits, "Bulk Cost x Price fit should produce at least one line"
+    bulk_corrections = compute_corrections_for_baskets(
+        result.basket_data,
+        bulk_fits,
+        4,
+        True,
+        COST_CORRECTION_FROM_LAST_POINT,
+        None,
+        None,
+    )
+    assert any(corr.applied for corr in bulk_corrections.values())
+    su_corrected = enrich_sumup_with_corrected_totals(
+        su_rows,
+        result.weekly_totals,
+        result.basket_data,
+        bulk_corrections,
+    )
+    last_su = su_corrected[-1]
+    assert "total_m_corrected" in last_su
+    assert "total_cost_corrected" in last_su
+    if last_su["total_sold"] > 0:
+        expected_cost_corr = (
+            (last_su["total_revenue"] - last_su["total_m_corrected"])
+            / last_su["total_sold"]
+        )
+        assert abs(last_su["total_cost_corrected"] - expected_cost_corr) < 1e-6
+    assert abs(last_su["total_m_corrected"] - last_su["total_m"]) > 1e-6
+
+    hybrid_margins = hybrid_margin_map(result.basket_data, bulk_corrections)
+    last_week = str(result.all_weeks[-1])
+    detail_corr = compute_basket_week_detail_rows(
+        result.basket_data,
+        result.weekly_totals,
+        last_week,
+        margin_by_basket=hybrid_margins,
+    )
+    assert detail_corr
+    assert any(
+        abs(row["Total Margin Corrected"] - row["Total Margin"]) > 1e-6
+        for row in detail_corr
+    )
+    wd_orig, _ = compute_basket_week_discount_rows(
+        result.basket_data, result.weekly_totals, result.all_weeks, last_week,
+    )
+    wd_corr, _ = compute_basket_week_discount_rows(
+        result.basket_data,
+        result.weekly_totals,
+        result.all_weeks,
+        last_week,
+        margin_by_basket=hybrid_margins,
+    )
+    assert wd_orig and wd_corr
+    orig_by_basket = {row["Basket"]: row for row in wd_orig}
+    changed = False
+    for row in wd_corr:
+        orig_row = orig_by_basket[row["Basket"]]
+        if abs(float(row["dM_QW"]) - float(orig_row["dM_QW"])) > 1e-6 if (
+            not math.isnan(float(row["dM_QW"]))
+            and not math.isnan(float(orig_row["dM_QW"]))
+        ) else False:
+            changed = True
+            break
+        margin_cols = [c for c in row if c.startswith("Margin[")]
+        if any(
+            abs(float(row[c]) - float(orig_row[c])) > 1e-6
+            for c in margin_cols
+            if not math.isnan(float(row[c])) and not math.isnan(float(orig_row[c]))
+        ):
+            changed = True
+            break
+    assert changed, "Margin Corrected should change Week Discount Margin/dM_QW for at least one basket"
 
     if pf:
         print(f"  Sold plane  z0={pf.z0:.6f}  a={pf.a:.6f}  b={pf.b:.6f}  adjR2={pf.adj_r2:.4f}")
@@ -766,6 +937,14 @@ def main():
     assert abs(purchase_1111 - 26.0) < 0.1, purchase_1111
     assert abs(margin_1111 - (-426.88)) < 0.1, margin_1111
     assert abs(price_1111 - (2222.27 / 57.0)) < 0.01, price_1111
+    recap_1111 = float(agg.recap.loc[agg.recap["year_week"] == "2026-20", "1111"].iloc[0])
+    assert abs(recap_1111 - 912.82) < 0.1, recap_1111
+    ts_agg = product_bs_result.basket_data["1111"]
+    assert abs(ts_agg.recap[0] - 912.82) < 0.1, ts_agg.recap[0]
+    su_agg = compute_sumup_series(
+        product_bs_result.weekly_totals, product_bs_result.all_weeks,
+    )
+    assert abs(su_agg[0]["total_recap"] - 912.82) < 0.1, su_agg[0]["total_recap"]
 
     product_bs_in_result, _ = run_tracking_product_bs_report_analysis(
         df_product_bs,
@@ -778,6 +957,8 @@ def main():
     assert abs(ts_in.count_product[0] - 5.0) < 0.1, ts_in.count_product[0]
     assert abs(product_bs_in_result.basket_data["1111"].purchase[0] - 6.0) < 0.1, ts_in.purchase[0]
     assert abs(ts_in.price[0] - (762.19 / 16.0)) < 0.01, ts_in.price[0]
+    assert abs(ts_in.recap[0] - 413.11) < 0.1, ts_in.recap[0]
+    assert abs(ratio_series(ts_in.sold, ts_in.stock)[0] - (16.0 / 679.143)) < 1e-6
 
     from core.transforms.data_prep import parse_discount_hist_lookup
     from core.analytics.basket_analysis import apply_discount_hist_to_basket_data
@@ -1039,6 +1220,8 @@ def main():
     fake.input_mode = "TrackingBaskets_v2 - product_BS. on date of sale"
     fake.fi_k = 3
     fake.fu_tracking_report = object()  # should be skipped by type/prefix
+    fake["pbs::scope::week_discount_export_w"] = True
+    fake["pbs::scope::generate_discount"] = True
     fake._pbs_scopes = {
         "pbs::TrackingBaskets_v2 - product_BS. on date of sale::Aggregated": {
             "analysis": result,
@@ -1054,6 +1237,7 @@ def main():
             "fit_sold_m": {},
             "bulk_fit_price_sold": {},
             "bulk_fit_price_stock_sold": {},
+            "bulk_fit_cost_price": {},
             "fit_sumup_cost": None,
             "fit_sumup_stock_sold": None,
             "sumup_margin_model": None,
@@ -1069,14 +1253,19 @@ def main():
     assert restored_payload["format"] == "pba_disc_proj"
     assert restored_payload["ui"]["fi_k"] == 3
     assert "fu_tracking_report" not in restored_payload["ui"]
+    assert "_pbs_scopes" not in restored_payload["ui"]
+    assert "pbs::scope::week_discount_export_w" not in restored_payload["ui"]
+    assert "pbs::scope::generate_discount" not in restored_payload["ui"]
 
     dest = _FakeSession()
     dest.log_messages = ["old"]
+    dest["pbs::scope::manual_edit_btn"] = True
     messages = apply_project_payload(dest, restored_payload)
     assert dest.fi_k == 3
     assert dest.input_mode == fake.input_mode
     assert dest._pbs_scopes["pbs::TrackingBaskets_v2 - product_BS. on date of sale::Aggregated"]["selected_basket"] == "1111"
     assert dest._pbs_scopes["pbs::TrackingBaskets_v2 - product_BS. on date of sale::Aggregated"]["analysis"].basket_count == result.basket_count
+    assert "pbs::scope::manual_edit_btn" not in dest
     assert any("restored" in line.lower() for line in messages)
     print(f"  Project bytes: {len(blob):,}")
 

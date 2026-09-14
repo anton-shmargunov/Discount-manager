@@ -118,13 +118,20 @@ def qw_index_spans(quadweeks: list[str]) -> list[tuple[str, int, int]]:
 
 
 def qw_value_averages(values: list[float], quadweeks: list[str]) -> dict[str, float]:
-    """Mean metric value for each quadweek."""
+    """Mean metric value for each quadweek (non-finite points skipped)."""
     buckets: dict[str, list[float]] = defaultdict(list)
     for value, qw in zip(values, quadweeks):
         key = normalize_quadweek(qw)
-        if key != "N/A":
-            buckets[key].append(float(value))
-    return {qw: float(np.mean(vs)) for qw, vs in buckets.items()}
+        if key == "N/A":
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(number) or math.isinf(number):
+            continue
+        buckets[key].append(number)
+    return {qw: float(np.mean(vs)) for qw, vs in buckets.items() if vs}
 
 
 def add_qw_average_hlines(
@@ -132,28 +139,40 @@ def add_qw_average_hlines(
     week_labels: list[str],
     values: list[float],
     quadweeks: list[str],
+    *,
+    dash: str = "dash",
+    line_color: str | None = None,
+    line_width: int = 2,
+    name: str = "",
+    hover_label: str = "Average",
+    legend_once: bool = False,
 ) -> None:
-    """Dashed horizontal segment per quadweek at the within-QW average."""
+    """Horizontal segment per quadweek at the within-QW average."""
     if not values or len(values) != len(quadweeks):
         return
 
     avgs = qw_value_averages(values, quadweeks)
     cmap = qw_color_map(quadweeks)
+    legend_shown = False
     for qw, start, end in qw_index_spans(quadweeks):
         avg = avgs.get(qw)
         if avg is None:
             continue
-        color = cmap.get(qw, UNCLUSTERED_COLOR)
+        color = line_color or cmap.get(qw, UNCLUSTERED_COLOR)
+        showlegend = bool(legend_once and name and not legend_shown)
         fig.add_trace(
             go.Scatter(
                 x=[week_labels[start], week_labels[end]],
                 y=[avg, avg],
                 mode="lines",
-                line=dict(color=color, width=2, dash="dash"),
-                hovertemplate=f"QW {qw}<br>Average: %{{y:.2f}}<extra></extra>",
-                showlegend=False,
+                name=name if showlegend else None,
+                line=dict(color=color, width=line_width, dash=dash),
+                hovertemplate=f"QW {qw}<br>{hover_label}: %{{y:.2f}}<extra></extra>",
+                showlegend=showlegend,
             )
         )
+        if showlegend:
+            legend_shown = True
 
 
 def add_qw_average_markers_2d(
@@ -290,15 +309,17 @@ def build_basket_scatter_3panel(
     use_qw_colors: bool = False,
     show_line: bool = False,
     show_qw_average: bool = False,
+    margin_values: list[float] | None = None,
 ) -> go.Figure:
     """
     3-panel scatter chart for a basket:
     1) Sold vs Price   2) M vs Price   3) M vs Sold
     """
+    m_values = list(margin_values) if margin_values is not None else list(ts.m)
     hover = [
         f"Week: {ts.weeks[i]} (QW: {ts.quadweeks[i]})<br>"
         f"Price: {ts.price[i]:.2f} | Sold: {ts.sold[i]:.2f}<br>"
-        f"M: {ts.m[i]:.2f} | Stock: {ts.stock[i]:.2f}"
+        f"M: {m_values[i]:.2f} | Stock: {ts.stock[i]:.2f}"
         for i in range(ts.n_weeks)
     ]
 
@@ -308,8 +329,8 @@ def build_basket_scatter_3panel(
 
     panels = [
         (ts.price, ts.sold, "rgba(59,130,246,0.75)", "Avg Price", "Sold Qty"),
-        (ts.price, ts.m, "rgba(16,185,129,0.75)", "Avg Price", "Margin"),
-        (ts.sold, ts.m, "rgba(139,92,246,0.75)", "Sold Qty", "Margin"),
+        (ts.price, m_values, "rgba(16,185,129,0.75)", "Avg Price", "Margin"),
+        (ts.sold, m_values, "rgba(139,92,246,0.75)", "Sold Qty", "Margin"),
     ]
     for col_idx, (xs, ys, default_color, x_label, y_label) in enumerate(panels, start=1):
         _add_colored_scatter_trace(
@@ -440,8 +461,10 @@ def build_3d_price_sold_m(
     use_qw_colors: bool = False,
     show_line: bool = False,
     show_qw_average: bool = False,
+    m_values: list[float] | None = None,
 ) -> go.Figure:
     """3D scatter: Price × Sold × M (time-labelled)."""
+    z_values = list(m_values) if m_values is not None else list(ts.m)
     colors = marker_colors_for_points(
         ts.quadweeks,
         use_qw_colors,
@@ -451,13 +474,13 @@ def build_3d_price_sold_m(
     line_color = "rgb(37,99,235)"
 
     fig = go.Figure(go.Scatter3d(
-        x=ts.price, y=ts.sold, z=ts.m,
+        x=ts.price, y=ts.sold, z=z_values,
         mode=mode,
         marker=dict(size=6, color=colors),
         line=dict(color=line_color, width=3),
         text=[
             f"Week: {ts.weeks[i]} (QW: {ts.quadweeks[i]})<br>"
-            f"Price: {ts.price[i]:.2f} | Sold: {ts.sold[i]:.2f} | M: {ts.m[i]:.2f}"
+            f"Price: {ts.price[i]:.2f} | Sold: {ts.sold[i]:.2f} | M: {z_values[i]:.2f}"
             for i in range(ts.n_weeks)
         ],
         hoverinfo="text",
@@ -467,7 +490,7 @@ def build_3d_price_sold_m(
             fig,
             ts.price,
             ts.sold,
-            ts.m,
+            z_values,
             ts.quadweeks,
             x_label="Price",
             y_label="Sold",
@@ -540,8 +563,10 @@ def build_3d_price_stock_m(
     planefit: Planefit | None = None,
     margin_surface: tuple[list[float], list[float], list[list[float]]] | None = None,
     show_qw_average: bool = False,
+    m_values: list[float] | None = None,
 ) -> go.Figure:
     """3D scatter: Price × Stock × M, with optional fitted and analytical surfaces."""
+    z_values = list(m_values) if m_values is not None else list(ts.m)
     colors = marker_colors_for_points(
         ts.quadweeks,
         use_qw_colors,
@@ -551,13 +576,13 @@ def build_3d_price_stock_m(
     line_color = "rgb(219,39,119)"
 
     fig = go.Figure(go.Scatter3d(
-        x=ts.price, y=ts.stock, z=ts.m,
+        x=ts.price, y=ts.stock, z=z_values,
         mode=mode,
         marker=dict(size=6, color=colors),
         line=dict(color=line_color, width=3),
         text=[
             f"Week: {ts.weeks[i]} (QW: {ts.quadweeks[i]})<br>"
-            f"Price: {ts.price[i]:.2f} | Stock: {ts.stock[i]:.2f} | M: {ts.m[i]:.2f}"
+            f"Price: {ts.price[i]:.2f} | Stock: {ts.stock[i]:.2f} | M: {z_values[i]:.2f}"
             for i in range(ts.n_weeks)
         ],
         hoverinfo="text",
@@ -568,7 +593,7 @@ def build_3d_price_stock_m(
             fig,
             ts.price,
             ts.stock,
-            ts.m,
+            z_values,
             ts.quadweeks,
             x_label="Price",
             y_label="Stock",

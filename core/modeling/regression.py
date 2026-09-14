@@ -275,6 +275,41 @@ def fit_plane(
     return compute_fit_stats_3d(x, y, z, raw)
 
 
+def values_skipping_last(
+    values: Sequence[float],
+    skip_last: int,
+) -> list[float]:
+    """Return ``values`` with the last ``skip_last`` points removed."""
+    skip = max(0, int(skip_last or 0))
+    items = list(values)
+    if skip == 0:
+        return items
+    if skip >= len(items):
+        return []
+    return items[:-skip]
+
+
+def paired_values_skipping_zero_x(
+    x: Sequence[float],
+    y: Sequence[float],
+    skip_zero_x: bool,
+) -> tuple[list[float], list[float]]:
+    """Drop paired points whose x value is exactly 0 when ``skip_zero_x`` is true."""
+    xs = list(x)
+    ys = list(y)
+    if not skip_zero_x:
+        n = min(len(xs), len(ys))
+        return xs[:n], ys[:n]
+    kept_x: list[float] = []
+    kept_y: list[float] = []
+    for xv, yv in zip(xs, ys):
+        if xv == 0:
+            continue
+        kept_x.append(xv)
+        kept_y.append(yv)
+    return kept_x, kept_y
+
+
 def fit_line(
     x: Sequence[float],
     y: Sequence[float],

@@ -30,14 +30,26 @@ Then open [http://localhost:8501](http://localhost:8501) in your browser.
 
 | Document | Audience |
 |---|---|
-| [docs/user-manual.md](docs/user-manual.md) | Analysts and operators — workflows, Week Discount, exports |
-| [docs/architecture.md](docs/architecture.md) | Developers — modules, data flow, session state, extension points |
+| [docs/user-manual.md](docs/user-manual.md) | Analysts and operators — workflows, Week Discount, exports, Project save |
+| [docs/architecture.md](docs/architecture.md) | Developers — modules, data flow, session state, `.disc_proj`, extension points |
+
+**Live app:** https://discount-manager-v1-1.streamlit.app/
 
 ---
 
 ## Input CSV Format
 
-Each of the four required CSV files must have:
+The Streamlit UI uses **TrackingBaskets_v2** files (one report CSV, optional discount history):
+
+| Mode | File | Notes |
+|------|------|--------|
+| TrackingBaskets_v2 report | Wide report CSV | Standard metric columns |
+| product_BS on date of sale | product_BS report | Suffix columns per category (default) |
+| product_BS monthly av. | product_BS report | Row-level SoldQty / Revenue averages |
+
+Optional **discount history** CSV(s) supply weekly discount and prom. Multiple per-category files are merged at Build. See [docs/user-manual.md](docs/user-manual.md).
+
+A legacy four-file wide-CSV layout (one column per basket) is still exercised in tests:
 
 | Column | Description |
 |---|---|
@@ -69,8 +81,11 @@ project_root/
 │   ├── clustering/            ← K-Means, Octants
 │   ├── modeling/              ← MLR, SLR, PCA, fit stats
 │   ├── optimization/          ← Pricing optimisation model
+│   ├── persistence/           ← .disc_proj save / restore
 │   ├── statistics/            ← Pearson, rolling metrics
 │   └── transforms/            ← ETL, feature engineering
+│
+├── ui/                        ← Streamlit sections (Week Discount, Project, scopes)
 │
 ├── services/                  ← Future: reporting, forecasting, AI agents
 ├── data/                      ← raw/, processed/, duckdb/, cache/, exports/
@@ -102,6 +117,8 @@ FastAPI, background workers, Jupyter notebooks, or tests.
 | **Cost line fit** | `Cost = z₀ + a·Price`; derives leverage price Pl |
 | **Margin optimisation** | Analytical `Price_max(Stock)` from combined fits |
 | **Sum-Up** | Weekly aggregates with overall correlation KPIs |
+| **Week Discount** | Strategy generation, manual edit, discount-history export (current + all Product BS) |
+| **Project save** | Sidebar **Save…** / **Restore** via `.disc_proj` snapshot |
 
 ---
 

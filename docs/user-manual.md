@@ -2,7 +2,7 @@
 
 **Pricing Correlation & Bucket Analysis · Phase 1**
 
-Version 1.0.0 · Last updated 2026-06-23
+Version 1.0.0 · Last updated 2026-09-12
 
 ---
 
@@ -16,6 +16,7 @@ PBA helps pricing analysts:
 4. Review aggregate **Sum-Up** metrics
 5. Plan **discounts and promotions** for a selected week using strategy rules or manual edits
 6. Export results and updated discount history
+7. Optionally **Save** the session as a `.disc_proj` file and **Restore** it later
 
 **Live app:** https://discount-manager-v1-1.streamlit.app/
 
@@ -51,6 +52,8 @@ Browse basket table → Click a row → Basket Detail
 Sum-Up section → Select a week
        ↓
 Week Discount → Generate / Edit → Export
+       ↓
+Optional: Project → Save… / Restore (.disc_proj)
 ```
 
 Each major step is described below in order.
@@ -70,7 +73,7 @@ Each major step is described below in order.
 ### Upload files
 
 1. **Main report CSV** — required for all modes
-2. **Discount history (discount + prom)** — optional; populates historical Discount and Prom columns
+2. **Discount history (discount + prom)** — optional; populates historical Discount and Prom columns. You may upload **one combined file** and/or **several per-category CSVs**. They are merged by `(year_week, basket)` at **Build** (later non-blank cells overwrite earlier ones).
 
 ### Product BS Category
 
@@ -148,6 +151,8 @@ Sortable table of all baskets with:
 - Stock trend metrics
 - Cluster group
 
+Buttons **Fit Price x Sold**, **Fit Price x Stock x Sold**, and **Fit Cost x Price** add extra columns only after they produce results. **Fit Cost x Price** lives in its own expander. **Skip last points** (default **4**) drops the latest weeks from the fit; **Skip 0** (on by default) drops weeks where Price = 0. **Cost correction** (default **From the last point**) plus **a_min** / **a_max** control **Cost Corrected** on Basket Detail. **Correct Margin** replaces skipped-week margin with **Margin Corrected** = Margin + Sold × (Cost − Cost Corrected). **Price_max** always uses the regression intercept (Option A), not the re-anchored intercept.
+
 **Click any row** to open **⑤ Basket Detail** for that basket.
 
 ---
@@ -198,7 +203,7 @@ Only one week is active at a time.
 
 Open **📉 Week Discount: {week}** after selecting a week in Sum-Up.
 
-This is the primary tool for setting **New Discount** and **New Prom** values basket by basket.
+This is the primary tool for setting **New Discount** and **New Prom** values basket by basket. A progress bar is shown while rows are computed, generated, or applied.
 
 ### Column groups
 
@@ -323,17 +328,24 @@ Historical "current" comes from discount history uploaded at build, not from the
 
 ## Export
 
-### Export Week Discount
+Open the **Export** expander below the Week Discount table. Buttons are disabled while **Edit** mode is on.
 
-Downloads the visible Week Discount table as CSV (raw numeric values).
+| Button | What you get |
+|--------|----------------|
+| **Week Discount** | Visible Week Discount columns (raw numeric values) for the current category |
+| **Discount history. Current** | Discount-history CSV for the **current** Product BS category (report mode: Aggregated) |
+| **Discount history. All** | One combined hist CSV with New Discount / New Prom from **every Product BS category already Built** this session (product_BS modes only) |
 
-Options:
+**Discount history. All** is empty until you **Build** (and generate/edit) each category you want included. Switching category and building again is required; categories not built in this session are omitted.
 
-- **Include 'no stock'** — expand to full canonical basket list (625 baskets); baskets without stock keep empty discount/prom cells
+### Options
 
-### Export Discount history
+- **Include 'no stock'** — expand Week Discount and hist exports to the full canonical basket list (625 baskets); baskets without stock keep empty discount/prom cells
+- **all history** (default **on**) — hist exports include uploaded history plus new week rows (same basket-week in the new week overwrites)
 
-Downloads a CSV in the **same format as the discount history input**, for **selected week + 1**:
+### Discount history week advance
+
+Downloads use the **same format as the discount history input**, for **selected week + 1**:
 
 | Field | Advance rule |
 |-------|----------------|
@@ -342,14 +354,9 @@ Downloads a CSV in the **same format as the discount history input**, for **sele
 | `week in quad (1_4)` | 1→2→3→4→1 |
 | `quadweek` | +1 only when new week in quad = 1 |
 
-**all history** checkbox (default **on**):
+Requires discount history upload at **Build** for a full merge when **all history** is on. **Discount history. All** merges hist snapshots from each built category.
 
-- **On** — full uploaded history plus new week rows (same basket-week in new week overwrites)
-- **Off** — only the new week rows
-
-Requires discount history upload at **Build** for full merge when **all history** is on.
-
-Export column set depends on Product BS Category (report mode uses Aggregated columns).
+Export column set depends on Product BS Category (report mode uses Aggregated columns). Combined **All** files contain every category column; unused cells stay empty.
 
 ---
 
@@ -388,16 +395,44 @@ Optional CSV with weekly discount and promotion per basket.
 
 Example file: `inputs/discount_hist_EXAMPLE_SHORT.csv`
 
+Per-category files (only In columns, only Out columns, …) may be uploaded together; Build merges them into one wide table.
+
+---
+
+## Save and restore a project
+
+The sidebar **Project** expander (above **Log**) snapshots the current session.
+
+| Action | Result |
+|--------|--------|
+| **Save…** | Dialog for a file name → download a `.disc_proj` file |
+| **Restore** | Upload a `.disc_proj` file, then click **Restore** |
+
+What is saved:
+
+- Built analysis for every Product BS category / input mode in the session
+- Week Discount generated values and manual edits
+- Filters, clustering, and other UI settings
+- Sidebar log
+
+What is **not** saved:
+
+- Original CSV uploads (you do not need to re-attach them after Restore — analysis is in the snapshot)
+- A remembered disk folder (the browser chooses where downloads go)
+
+Refresh or a new browser tab still starts empty unless you Restore a file.
+
 ---
 
 ## Sidebar log
 
-The sidebar **Log** panel records:
+The **Log** panel records:
 
 - Input mode and upload row counts
 - Product BS category and metric basis
-- Discount history merge summary
+- Discount history merge summary (including multi-file aggregation)
 - K-Means / Octants completion
+- Project restore
 - Build errors
 
 Use it for troubleshooting when results look unexpected.
@@ -407,16 +442,17 @@ Use it for troubleshooting when results look unexpected.
 ## Typical session checklist
 
 1. Select input format and upload report CSV
-2. Optionally upload discount history (matching category)
-3. Set filters → **Build Project**
+2. Optionally upload discount history (one combined file and/or several per-category files)
+3. Set filters → **Build Project** (repeat for each Product BS category you need)
 4. Optional: **K-Means** or **Octants**
 5. Click a basket → review Basket Detail (optional)
 6. In Sum-Up, select target week
 7. Open **Week Discount**
 8. Configure strategy → **Generate Discount** → **Generate Prom**
 9. **Edit** / **Apply** manual adjustments
-10. **Export Week Discount** and/or **Export Discount history**
+10. Open **Export** → **Week Discount**, **Discount history. Current**, and/or **Discount history. All**
 11. Re-import exported discount history on the next planning cycle
+12. Optional: **Project → Save…** to download a `.disc_proj` snapshot
 
 ---
 
@@ -429,17 +465,21 @@ Use it for troubleshooting when results look unexpected.
 | Discount/Prom columns empty | No discount history uploaded | Upload discount history and rebuild |
 | Switching In/Out shows wrong values | Separate scope per category | Rebuild after category change; values are per-scope |
 | dProm looks wrong after edit | Deltas update on Apply only | Click Apply after editing |
+| **Discount history. All** empty / disabled | Category not Built this session | Build and generate/edit each Product BS category, then export |
 | Export history missing old weeks | No hist at build or **all history** off | Upload hist before Build; enable **all history** |
 | Prom export rejected on re-import | Invalid prom step | Use 0, 0.02, 0.04, … only |
+| Restore failed / buttons error | Invalid file or widget-key conflict | Use a `.disc_proj` from this app version; retry Restore |
+| Restored session has no CSV files | Uploads are not stored in the project file | Expected — analysis is restored from the snapshot |
 
 ---
 
 ## Data persistence
 
-- Analysis results and generated discounts live in **browser session state**
+- Analysis results and generated discounts live in **browser session state** until you save
 - Refreshing the page or closing the tab **clears unsaved work**
-- Export CSV files to persist Week Discount and discount history outputs
-- Strategy defaults reload from `configs/strategies/strategies.v1.csv` on each session
+- **Project → Save…** downloads a `.disc_proj` snapshot; **Restore** loads it in a new session
+- Export CSV files to persist Week Discount and discount history outputs independently of the project file
+- Strategy defaults reload from `configs/strategies/strategies.v1.csv` on each session (saved UI edits to bins are included in `.disc_proj`)
 
 ---
 

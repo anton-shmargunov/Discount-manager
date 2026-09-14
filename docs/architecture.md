@@ -2,7 +2,7 @@
 
 **Pricing Correlation & Bucket Analysis · Phase 1 Streamlit MVP**
 
-Version 1.0.0 · Last updated 2026-06-23
+Version 1.0.0 · Last updated 2026-09-12
 
 ---
 
@@ -36,14 +36,17 @@ PBA.v.1.250525/
 ├── app.py                          # Thin entry: page config, theme, welcome screen
 │
 ├── pages/
-│   └── 01_Correlation_Analysis.py  # Main analysis page (~2200 lines)
+│   └── 01_Correlation_Analysis.py  # Main analysis page (~2250 lines)
 │
 ├── ui/                             # Reusable Streamlit sections (no analytics)
 │   ├── product_bs_scope.py         # Per-mode/category session isolation
-│   └── week_discount_ui.py         # Week Discount UI (strategy, table, exports)
+│   ├── week_discount_ui.py         # Week Discount UI (strategy, table, exports)
+│   └── project_save_ui.py          # Sidebar Project save / restore (.disc_proj)
 │
 ├── core/                           # Pure analytical engine
 │   ├── models.py                   # Dataclasses: BasketTimeSeries, BasketResult, …
+│   ├── persistence/
+│   │   └── project_io.py           # .disc_proj pack / unpack / apply (no Streamlit)
 │   ├── analytics/
 │   │   ├── basket_analysis.py      # run_*_analysis, clustering hooks, sum-up
 │   │   ├── week_basket_tables.py   # Week Discount rows, filters, deltas, export
@@ -136,7 +139,8 @@ Main workflow page, numbered sections:
 Extracted UI modules:
 
 - `render_week_discount_section()` from `ui/week_discount_ui.py`
-- Scope helpers from `ui/product_bs_scope.py`
+- Scope helpers from `ui/product_bs_scope.py` (`PRODUCT_BS_CATEGORY_OPTIONS`, `iter_built_product_bs_scopes`)
+- `render_sidebar_project_panel()` / `apply_pending_project_restore()` from `ui/project_save_ui.py`
 
 ---
 
@@ -204,11 +208,13 @@ Defined in `ui/product_bs_scope.py`:
 
 Global (unscoped): `input_mode`, filter text inputs, sidebar log (`log_messages`).
 
+A full session snapshot (all scopes + picklable UI keys + log) can be saved as `.disc_proj` — see [Project persistence](#project-persistence).
+
 ---
 
 ## Discount history pipeline
 
-Optional CSV merged at **Build** into `BasketTimeSeries.discount` / `.prom`.
+Optional CSV(s) merged at **Build** into `BasketTimeSeries.discount` / `.prom`. Multiple files are accepted.
 
 ### Column mapping by category
 
@@ -227,7 +233,11 @@ Functions:
 
 - `parse_discount_hist_lookup()` — ingest at build
 - `apply_discount_hist_to_basket_data()` — merge into time series
+- `merge_discount_hist_dataframes()` — combine one or more uploaded CSVs by `(year_week, basket)` (later non-blank values win)
 - `build_discount_hist_export_rows()` + `merge_discount_hist_export()` — export with week **+1** metadata
+- `combine_discount_hist_export_by_category()` — merge per-category New Discount/Prom into one wide hist file (`DISCOUNT_HIST_CATEGORY_ORDER`)
+
+The discount-history uploader accepts **multiple files**. At Build they are aggregated with `merge_discount_hist_dataframes()` before parse/apply. A single combined file also works.
 
 ---
 
@@ -285,12 +295,42 @@ Additional prom sections in `strategies.v1.csv` are reserved for future modes.
 
 ### Export paths
 
-| Export | Module functions |
-|--------|------------------|
-| Week Discount CSV | `normalize_week_discount_export_rows`, `expand_week_discount_export_rows` |
-| Discount history CSV | `build_discount_hist_export_rows`, `advance_discount_hist_week_metadata`, `merge_discount_hist_export` |
+UI lives in the Week Discount **Export** expander. Buttons are disabled while Edit mode is active.
+
+| Export button | Module functions | Scope |
+|---------------|------------------|--------|
+| **Week Discount** | `normalize_week_discount_export_rows`, `expand_week_discount_export_rows` | Visible columns for the current category |
+| **Discount history. Current** | `build_discount_hist_export_rows`, `advance_discount_hist_week_metadata`, `merge_discount_hist_export` | Current Product BS category (report mode: Aggregated) |
+| **Discount history. All** | `iter_built_product_bs_scopes` + `combine_discount_hist_export_by_category` | product_BS modes only; every **built** category in this session |
+
+**Discount history. All** is omitted in report mode. It only includes categories that have been **Built** (and generated/edited) this session — switching category and building each one is required.
+
+Checkboxes: **Include 'no stock'** (canonical 625-basket list) and **all history** (merge uploaded hist + new week; last duplicate `(basket, year_week)` wins).
+
+A progress bar (`st.progress`) runs while Week Discount rows are computed, generated, applied, and rendered; it is cleared before the Export expander.
 
 Canonical basket universe: `inputs/full list of baskets.csv` (625 baskets, 5⁴ codes).
+
+---
+
+## Project persistence
+
+Sidebar expander **Project** (above **Log**). Format: magic `PBA1DISC` + gzip pickle. Extension `.disc_proj`. Implementation: `core/persistence/project_io.py` (pure Python) + `ui/project_save_ui.py`.
+
+| Action | Behaviour |
+|--------|-----------|
+| **Save…** | Dialog for filename → download snapshot |
+| **Restore** | File uploader (`type=["disc_proj"]`) then **Restore** |
+
+Payload: `format`, `version`, `saved_at`, `ui` (picklable session keys), `scopes` (`_pbs_scopes` including `analysis`), `log_messages`.
+
+**Not saved / not restored:**
+
+- Original CSV uploads (`fu_*` keys, `UploadedFile` objects)
+- Streamlit **button** and **download_button** keys (assignment is forbidden; fragments such as `generate_discount`, `week_discount_export`, `::btn_`)
+- Project-panel widget keys (`_project_*`)
+
+Restore applies **before** widgets render (`apply_pending_project_restore()`). After restore, analysis comes from the saved scope snapshot — re-upload of CSVs is not required. Widget-key cleanup must **not** delete `_pbs_scopes`. Browser **Save As / fixed download folder** is not available in Streamlit Cloud; a desktop wrapper would be needed for a true disk path.
 
 ---
 
@@ -305,7 +345,13 @@ Canonical basket universe: `inputs/full list of baskets.csv` (625 baskets, 5⁴ 
 | `tracking_product_bs_report_to_frame_sets` | product_BS report → per-category frames |
 | `compute_basket_features`, `compute_weekly_totals` | Feature + correlation computation |
 | `parse_discount_hist_lookup` | Discount history ingest |
+| `merge_discount_hist_dataframes` | Multi-file hist upload merge |
 | `build_discount_hist_export_rows`, `merge_discount_hist_export` | Discount history export |
+| `combine_discount_hist_export_by_category` | All-category hist export combine |
+
+### `core/persistence/project_io.py`
+
+`.disc_proj` snapshot: `build_project_payload`, `pack_project_bytes`, `unpack_project_bytes`, `apply_project_payload`. Must not import Streamlit.
 
 ### `core/analytics/basket_analysis.py`
 
@@ -368,8 +414,10 @@ python tests/test_e2e.py
 - Week Discount columns, dProm delta rules, manual overrides
 - Prom strategy, full-basket export (625), scope isolation
 - Strategies v1 loading
+- Multi-file discount hist merge, all-category export combine
+- `.disc_proj` round-trip; button / `fu_*` keys skipped on restore
 
-**Not covered:** Streamlit widget integration, browser UX, Cloud deployment runtime.
+**Not covered:** Streamlit widget integration, browser UX, Cloud deployment runtime, Project Restore of very large sessions in the browser.
 
 ---
 
@@ -412,9 +460,11 @@ UI extraction continues incrementally (`ui/week_discount_ui.py` is the pattern f
 | Area | Detail |
 |------|--------|
 | Streamlit `data_editor` | Do not assign widget key in `session_state` before render; no preview DataFrame feedback in edit mode |
-| Session-only state | Generated/manual discount values lost on browser refresh |
+| Session-only state | Generated/manual discount values lost on browser refresh unless saved as `.disc_proj` |
+| Project restore + widgets | Never restore button/`download_button` keys; uploads are not re-attached. Cleanup must preserve `_pbs_scopes`. |
 | Scope switch | Rebuild after changing input mode or category |
-| Discount hist export | `all history` merge requires upload at Build |
+| Discount hist export | `all history` merge requires upload at Build; **Discount history. All** only includes **built** categories |
+| Download folder | Browser-controlled; app cannot set Save As path |
 | Main page size | `01_Correlation_Analysis.py` still monolithic for sections ⑤–⑥ |
 | Prom strategies | Only "Set previous prom" implemented |
 
@@ -424,5 +474,6 @@ UI extraction continues incrementally (`ui/week_discount_ui.py` is the pattern f
 
 - [user-manual.md](user-manual.md) — operator guide
 - [README.md](../README.md) — quick start
-- `handoff_260623.md` — latest developer handoff
+- `handoff_260912.md` — latest developer handoff (Project save, all-BS export)
+- `handoff_260623.md` — Week Discount edit/export, Cloud deploy
 - `PBA. Arch. Spec. Phase 1.txt` — original specification

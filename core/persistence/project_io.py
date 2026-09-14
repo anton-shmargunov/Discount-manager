@@ -26,6 +26,9 @@ _SKIP_SESSION_KEYS = frozenset({
     "_project_save_name",
 })
 
+# Restored from payload["scopes"] — never delete during widget-key cleanup.
+_RESTORE_MANAGED_KEYS = frozenset({"_pbs_scopes"})
+
 _SKIP_KEY_PREFIXES = (
     "fu_",               # file uploaders (binary handles)
     "_project_",         # save/restore panel widgets (buttons disallowed)
@@ -176,6 +179,8 @@ def _clear_write_disallowed_keys(session_state: Any) -> None:
     """Drop button/download keys so Streamlit can recreate those widgets."""
     for key in list(session_state.keys()):
         key_str = str(key)
+        if key_str in _RESTORE_MANAGED_KEYS:
+            continue
         if _is_write_disallowed_widget_key(key_str):
             try:
                 del session_state[key]

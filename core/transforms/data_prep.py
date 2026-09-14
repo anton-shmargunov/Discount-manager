@@ -37,6 +37,7 @@ class MetricFrameSet:
     stock: pd.DataFrame
     count_product: Optional[pd.DataFrame] = None
     purchase: Optional[pd.DataFrame] = None
+    recap: Optional[pd.DataFrame] = None
 
 
 @dataclass
@@ -238,6 +239,11 @@ def tracking_report_to_frame_set(
     df_stock = _metric_wide_frame(report, "StockQty_W", week_meta, aggfunc="sum")
     df_count_product = _metric_wide_frame(report, "CountProduct_W", week_meta, aggfunc="sum")
     df_purchase = _metric_wide_frame(report, "PurchaseQty", week_meta, aggfunc="sum")
+    df_recap = (
+        _metric_wide_frame(report, "Recap", week_meta, aggfunc="sum")
+        if "Recap" in report.columns
+        else None
+    )
     return MetricFrameSet(
         sold=df_sold,
         price=df_price,
@@ -245,6 +251,7 @@ def tracking_report_to_frame_set(
         stock=df_stock,
         count_product=df_count_product,
         purchase=df_purchase,
+        recap=df_recap,
     )
 
 
@@ -275,26 +282,31 @@ PRODUCT_BS_METRIC_COLUMNS: dict[str, dict[str, str]] = {
         "sold": "SoldQty_In",
         "margin": "Margin_In",
         "revenue": "Revenue_In",
+        "recap": "Recap_In",
     },
     "Out": {
         "sold": "SoldQty_Out",
         "margin": "Margin_Out",
         "revenue": "Revenue_Out",
+        "recap": "Recap_Out",
     },
     "OutByCondition": {
         "sold": "SoldQty_OutByCondition",
         "margin": "Margin_OutByCondition",
         "revenue": "Revenue_OutByCondition",
+        "recap": "Recap_OutByCondition",
     },
     "OutByMinPrice": {
         "sold": "SoldQty_OutByMinPrice",
         "margin": "Margin_OutByMinPrice",
         "revenue": "Revenue_OutByMinPrice",
+        "recap": "Recap_OutByMinPrice",
     },
     "none": {
         "sold": "SoldQty_none",
         "margin": "Margin_none",
         "revenue": "Revenue_none",
+        "recap": "Recap_none",
     },
 }
 
@@ -315,7 +327,9 @@ def _clean_tracking_product_bs_report(df_report: pd.DataFrame) -> pd.DataFrame:
         "Margin",
     }
     for category_cols in PRODUCT_BS_METRIC_COLUMNS.values():
-        required.update(category_cols.values())
+        required.update(
+            col for key, col in category_cols.items() if key in {"sold", "margin", "revenue"}
+        )
 
     missing = sorted(required - set(report.columns))
     if missing:
@@ -405,6 +419,17 @@ def _group_metric_values(
     )
 
 
+def _optional_group_metric_values(
+    report: pd.DataFrame,
+    value_col: str,
+    output_col: str,
+) -> Optional[pd.DataFrame]:
+    """Sum a metric by basket-week when the source column exists."""
+    if not value_col or value_col not in report.columns:
+        return None
+    return _group_metric_values(report, value_col, output_col)
+
+
 def _frame_set_from_grouped_values(
     sold: pd.DataFrame,
     revenue: pd.DataFrame,
@@ -413,6 +438,7 @@ def _frame_set_from_grouped_values(
     week_meta: pd.DataFrame,
     count_product: Optional[pd.DataFrame] = None,
     purchase: Optional[pd.DataFrame] = None,
+    recap: Optional[pd.DataFrame] = None,
 ) -> MetricFrameSet:
     """Create canonical sold/price/margin/stock frames from grouped values."""
     price = sold.merge(revenue, on=["year_week", "basket"], how="outer").fillna(0.0)
@@ -434,6 +460,10 @@ def _frame_set_from_grouped_values(
         purchase=(
             _wide_from_values(purchase, "purchase", week_meta)
             if purchase is not None else None
+        ),
+        recap=(
+            _wide_from_values(recap, "recap", week_meta)
+            if recap is not None else None
         ),
     )
 
@@ -530,6 +560,10 @@ def tracking_product_bs_report_to_frame_sets(
             "PurchaseQty",
             "purchase",
         )
+        if use_monthly_average_metrics:
+            recap = _optional_group_metric_values(category_report, "Recap", "recap")
+        else:
+            recap = _optional_group_metric_values(report, cols.get("recap", ""), "recap")
 
         categories[category] = _frame_set_from_grouped_values(
             sold=sold,
@@ -539,6 +573,7 @@ def tracking_product_bs_report_to_frame_sets(
             week_meta=week_meta,
             count_product=count_product,
             purchase=purchase,
+            recap=recap,
         )
         category_sold_values.append(sold)
         category_margin_values.append(margin)
@@ -556,6 +591,7 @@ def tracking_product_bs_report_to_frame_sets(
     aggregate_stock = _group_metric_values(report, "StockQty_W", "stock")
     aggregate_count_product = _group_metric_values(report, "CountProduct_W", "count_product")
     aggregate_purchase = _group_metric_values(report, "PurchaseQty", "purchase")
+    aggregate_recap = _optional_group_metric_values(report, "Recap", "recap")
 
     if not use_monthly_average_metrics:
         suffix_sold = _sum_category_metric(suffix_sold_values, "sold")
@@ -573,6 +609,7 @@ def tracking_product_bs_report_to_frame_sets(
         week_meta=week_meta,
         count_product=aggregate_count_product,
         purchase=aggregate_purchase,
+        recap=aggregate_recap,
     )
 
     return ProductBSTransformResult(
@@ -668,6 +705,7 @@ def compute_basket_features(
     max_m: float = math.inf,
     count_product_dict: Optional[dict[str, pd.Series]] = None,
     purchase_dict: Optional[dict[str, pd.Series]] = None,
+    recap_dict: Optional[dict[str, pd.Series]] = None,
 ) -> tuple[list[BasketResult], dict[str, BasketTimeSeries]]:
     """
     Core ETL: build per-basket summary results and time series.
@@ -697,6 +735,7 @@ def compute_basket_features(
         arr_stock: list[float] = []
         arr_count_product: list[float] = []
         arr_purchase: list[float] = []
+        arr_recap: list[float] = []
         arr_cost: list[float] = []
         arr_weeks: list[str] = []
         arr_qw: list[str] = []
@@ -720,11 +759,14 @@ def compute_basket_features(
 
             cp = float("nan")
             pur = float("nan")
+            rec = float("nan")
             try:
                 if count_product_dict is not None:
                     cp = float(count_product_dict[w][basket])
                 if purchase_dict is not None:
                     pur = float(purchase_dict[w][basket])
+                if recap_dict is not None:
+                    rec = float(recap_dict[w][basket])
             except (KeyError, ValueError, TypeError):
                 pass
 
@@ -746,6 +788,7 @@ def compute_basket_features(
             arr_stock.append(stk)
             arr_count_product.append(cp)
             arr_purchase.append(pur)
+            arr_recap.append(rec)
             arr_cost.append(cost)
             arr_weeks.append(w)
             arr_qw.append(str(sold_dict[w].get("quadweek", "N/A")).strip() or "N/A")
@@ -809,6 +852,7 @@ def compute_basket_features(
             cost=arr_cost,
             count_product=arr_count_product,
             purchase=arr_purchase,
+            recap=arr_recap,
             week_in_quad=arr_week_in_quad,
         )
 
@@ -857,6 +901,9 @@ def compute_weekly_totals(
                 totals[w].sum_count_product += ts.count_product[i]
             if i < len(ts.purchase) and not math.isnan(ts.purchase[i]):
                 totals[w].sum_purchase += ts.purchase[i]
+            recap_values = getattr(ts, "recap", None) or []
+            if i < len(recap_values) and not math.isnan(recap_values[i]):
+                totals[w].sum_recap += recap_values[i]
             totals[w].valid_baskets += 1
             if totals[w].quadweek == "N/A":
                 totals[w].quadweek = str(ts.quadweeks[i])
@@ -877,6 +924,11 @@ def compute_weekly_totals(
                     purchase=(
                         ts.purchase[i]
                         if i < len(ts.purchase) and not math.isnan(ts.purchase[i])
+                        else 0.0
+                    ),
+                    recap=(
+                        recap_values[i]
+                        if i < len(recap_values) and not math.isnan(recap_values[i])
                         else 0.0
                     ),
                 )

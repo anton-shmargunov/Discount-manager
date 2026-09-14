@@ -40,6 +40,7 @@ def run_basket_analysis(
     df_stock: pd.DataFrame,
     df_count_product: Optional[pd.DataFrame] = None,
     df_purchase: Optional[pd.DataFrame] = None,
+    df_recap: Optional[pd.DataFrame] = None,
     min_sold: float = -math.inf,
     max_sold: float = math.inf,
     min_price: float = 0.001,
@@ -71,6 +72,7 @@ def run_basket_analysis(
     df_stock = normalize_csv_df(df_stock)
     df_count_product = normalize_csv_df(df_count_product) if df_count_product is not None else None
     df_purchase = normalize_csv_df(df_purchase) if df_purchase is not None else None
+    df_recap = normalize_csv_df(df_recap) if df_recap is not None else None
 
     sold_dict = index_by_week(df_sold)
     price_dict = index_by_week(df_price)
@@ -78,6 +80,7 @@ def run_basket_analysis(
     stock_dict = index_by_week(df_stock)
     count_product_dict = index_by_week(df_count_product) if df_count_product is not None else None
     purchase_dict = index_by_week(df_purchase) if df_purchase is not None else None
+    recap_dict = index_by_week(df_recap) if df_recap is not None else None
 
     weeks = resolve_common_weeks(
         [sold_dict, price_dict, m_dict, stock_dict],
@@ -103,6 +106,7 @@ def run_basket_analysis(
         max_m=max_m,
         count_product_dict=count_product_dict,
         purchase_dict=purchase_dict,
+        recap_dict=recap_dict,
     )
 
     if not basket_results:
@@ -144,6 +148,7 @@ def run_tracking_report_analysis(
         frames.stock,
         df_count_product=frames.count_product,
         df_purchase=frames.purchase,
+        df_recap=frames.recap,
         min_sold=min_sold,
         max_sold=max_sold,
         min_price=min_price,
@@ -196,6 +201,7 @@ def run_tracking_product_bs_report_analysis(
         frames.stock,
         df_count_product=frames.count_product,
         df_purchase=frames.purchase,
+        df_recap=frames.recap,
         min_sold=min_sold,
         max_sold=max_sold,
         min_price=min_price,
@@ -272,6 +278,7 @@ def compute_sumup_series(
             "total_purchase": wt.sum_purchase,
             "total_revenue": wt.sum_sold_price,
             "total_m": wt.sum_m,
+            "total_recap": wt.sum_recap,
             "total_cost": wt.weighted_price - (wt.sum_m / wt.sum_sold) if wt.sum_sold > 0 else 0.0,
             "total_monthly_reserve": monthly_reserve(wt.sum_stock, wt.sum_sold),
             "corr_SP": compute_pearson(sold_vals, price_vals),

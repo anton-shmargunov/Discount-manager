@@ -29,6 +29,7 @@ class BasketTimeSeries:
     week_in_quad: list[int] = field(default_factory=list)
     discount: list[float] = field(default_factory=list)
     prom: list[float] = field(default_factory=list)
+    recap: list[float] = field(default_factory=list)
 
     # Fit results — populated lazily by the modeling layer
     fit_sold: Optional[Planefit] = None   # Sold = f(Price, Stock)
@@ -116,6 +117,7 @@ class WeeklyPoint:
     stock: float
     count_product: float = 0.0
     purchase: float = 0.0
+    recap: float = 0.0
 
 
 @dataclass
@@ -132,6 +134,7 @@ class WeeklyTotal:
     valid_baskets: int
     sum_count_product: float = 0.0
     sum_purchase: float = 0.0
+    sum_recap: float = 0.0
     quadweek: str = "N/A"
     week_in_quad: int = 0
     points: list[WeeklyPoint] = field(default_factory=list)

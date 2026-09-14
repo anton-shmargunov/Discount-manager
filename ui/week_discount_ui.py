@@ -78,6 +78,12 @@ from core.transforms.data_prep import (
 DISCOUNT_SETTINGS_CSV = STRATEGIES_V1_PATH
 # Bump when strategies file parsing or default layout changes (invalidates Streamlit caches).
 DISCOUNT_SETTINGS_UI_VERSION = 5
+WEEK_DISCOUNT_MARGIN_ORIGINAL = "Margin"
+WEEK_DISCOUNT_MARGIN_CORRECTED = "Margin Corrected"
+WEEK_DISCOUNT_MARGIN_SOURCES = (
+    WEEK_DISCOUNT_MARGIN_ORIGINAL,
+    WEEK_DISCOUNT_MARGIN_CORRECTED,
+)
 
 
 @st.cache_data(show_spinner=False)
@@ -631,16 +637,23 @@ def _category_week_discount_hist_export_rows(
     *,
     include_no_stock: bool,
     full_basket_list: list[str],
+    margin_by_basket: dict[str, list[float]] | None = None,
 ) -> list[dict]:
     """Build discount-history export rows for one built Product BS category."""
     basket_data = analysis.basket_data
     weekly_totals = analysis.weekly_totals
     all_weeks = analysis.all_weeks
+    margin_source = ss.get(
+        scoped_widget_key(scope_key, "wd_margin_source"),
+        WEEK_DISCOUNT_MARGIN_CORRECTED,
+    )
+    use_corrected = margin_source == WEEK_DISCOUNT_MARGIN_CORRECTED
     base_rows, week_discount_columns = compute_basket_week_discount_rows(
         basket_data,
         weekly_totals,
         all_weeks,
         selected_week,
+        margin_by_basket=margin_by_basket if use_corrected else None,
     )
     if not base_rows:
         return []
@@ -697,8 +710,25 @@ def render_week_discount_section(
     discount_hist_category: str,
     discount_hist_df: pd.DataFrame | None = None,
     input_mode: str | None = None,
+    margin_by_basket: dict[str, list[float]] | None = None,
 ) -> None:
     """Render Week Discount toggles, filters, strategy, table, and sum-up metrics."""
+    def wk(widget_key: str) -> str:
+        return scoped_widget_key(scope_key, widget_key)
+
+    src_col, _ = st.columns([2, 10])
+    margin_source = src_col.selectbox(
+        "Margin columns",
+        list(WEEK_DISCOUNT_MARGIN_SOURCES),
+        index=WEEK_DISCOUNT_MARGIN_SOURCES.index(WEEK_DISCOUNT_MARGIN_CORRECTED),
+        key=wk("wd_margin_source"),
+        help=(
+            "Margin uses original basket margin. Margin Corrected uses the hybrid "
+            "series from Cost Correction for Margin[], dM_QW, MtoSt[], dMtoSt_QW, "
+            "and discount generation."
+        ),
+    )
+    use_corrected_margin = margin_source == WEEK_DISCOUNT_MARGIN_CORRECTED
     progress = st.progress(0, text="Preparing Week Discount…")
     try:
         progress.progress(20, text="Computing Week Discount rows…")
@@ -707,6 +737,7 @@ def render_week_discount_section(
             weekly_totals,
             all_weeks,
             selected_week,
+            margin_by_basket=margin_by_basket if use_corrected_margin else None,
         )
         if not week_discount_rows:
             progress.empty()
@@ -724,9 +755,6 @@ def render_week_discount_section(
         progress.empty()
         raise
     ss = st.session_state
-
-    def wk(widget_key: str) -> str:
-        return scoped_widget_key(scope_key, widget_key)
 
     wd_col1, wd_col2, wd_col3, wd_col4, wd_col5, wd_col6, wd_col7, wd_col8, wd_col9, wd_col10, wd_col11, wd_col12 = st.columns(12)
     wd_settings = WeekDiscountViewSettings(
@@ -766,7 +794,8 @@ def render_week_discount_section(
         f"{wd_settings.show_stock}_{wd_settings.show_margin}_{wd_settings.show_mtost}_"
         f"{wd_settings.show_sold}_{wd_settings.show_price}_{wd_settings.show_reserve}_"
         f"{wd_settings.show_count_product}_"
-        f"{wd_settings.show_w1}_{wd_settings.show_w4}_{wd_settings.show_w5}"
+        f"{wd_settings.show_w1}_{wd_settings.show_w4}_{wd_settings.show_w5}_"
+        f"{margin_source}"
     )
 
     with st.expander("Filters", expanded=False):
@@ -1128,6 +1157,7 @@ def render_week_discount_section(
                         cat_key,
                         include_no_stock=include_no_stock,
                         full_basket_list=full_basket_list,
+                        margin_by_basket=cat_scope.get("basket_margin_hybrid"),
                     )
                     if cat_hist:
                         category_rows[category] = cat_hist

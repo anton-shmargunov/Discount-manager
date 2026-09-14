@@ -26,6 +26,15 @@ from core.analytics.basket_analysis import (
     init_discount_prom_on_basket_data,
     AnalysisResult,
 )
+from core.analytics.cost_correction import (
+    COST_CORRECTION_FROM_LAST_POINT,
+    COST_CORRECTION_MODES,
+    compute_corrections_for_baskets,
+    compute_cost_margin_correction,
+    enrich_sumup_with_corrected_totals,
+    fit_bulk_cost_price,
+    hybrid_margin_map,
+)
 from core.analytics.week_basket_tables import compute_basket_week_detail_rows
 from ui.week_discount_ui import render_week_discount_section
 from ui.project_save_ui import apply_pending_project_restore, render_sidebar_project_panel
@@ -43,14 +52,17 @@ from ui.product_bs_scope import (
 )
 from core.transforms.data_prep import merge_discount_hist_dataframes
 from core.models import BasketTimeSeries, Planefit, Linefit
-from core.modeling.regression import fit_plane, fit_line
+from core.modeling.regression import (
+    fit_plane,
+    fit_line,
+)
 from core.optimization.price_optimization import (
     evaluate_week_margin_model,
     build_margin_surface,
     compute_price_max_curve,
 )
 from core.statistics.correlations import compute_pearson
-from core.statistics.metrics import monthly_reserve_series
+from core.statistics.metrics import monthly_reserve_series, ratio_series
 from visualizations.cluster_charts import build_2d_cluster_scatter, build_3d_cluster_scatter
 from visualizations.detail_charts import (
     build_basket_scatter_3panel,
@@ -68,8 +80,7 @@ from visualizations.sumup_charts import (
     build_sumup_stock_m_3d,
     build_sumup_stock_sold_3d,
     build_metric_progress,
-    build_stock_progress,
-    build_vertical_stack_progress,
+    build_vertical_stack_from_specs,
     build_weekly_basket_3panel,
     build_weekly_basket_3d,
     build_weekly_basket_stock_sold_3d,
@@ -219,6 +230,16 @@ def _basket_week_progress_specs(ts: BasketTimeSeries) -> list[dict]:
             "line_color": "rgb(109,40,217)",
         },
         {
+            "key": "recap",
+            "label": "Recap",
+            "default": False,
+            "title": "Recap vs Week",
+            "y_title": "Recap",
+            "values": _basket_optional_metric_values(ts, getattr(ts, "recap", []) or []),
+            "marker_color": "rgba(245,158,11,0.75)",
+            "line_color": "rgb(217,119,6)",
+        },
+        {
             "key": "cost_per_sold",
             "label": "Cost/Sold",
             "default": False,
@@ -240,6 +261,232 @@ def _basket_week_progress_specs(ts: BasketTimeSeries) -> list[dict]:
             ),
             "marker_color": "rgba(234,179,8,0.75)",
             "line_color": "rgb(202,138,4)",
+        },
+        {
+            "key": "sold_to_stock",
+            "label": "SoldToStock",
+            "default": False,
+            "title": "SoldToStock vs Week",
+            "y_title": "Sold / Stock",
+            "values": ratio_series(ts.sold, ts.stock),
+            "marker_color": "rgba(14,165,233,0.75)",
+            "line_color": "rgb(2,132,199)",
+        },
+        {
+            "key": "mtost",
+            "label": "MtoSt",
+            "default": False,
+            "title": "MtoSt vs Week",
+            "y_title": "Margin / Stock",
+            "values": ratio_series(ts.m, ts.stock),
+            "marker_color": "rgba(6,182,212,0.75)",
+            "line_color": "rgb(8,145,178)",
+        },
+        {
+            "key": "mtosold",
+            "label": "MtoSold",
+            "default": False,
+            "title": "MtoSold vs Week",
+            "y_title": "Margin / Sold",
+            "values": ratio_series(ts.m, ts.sold),
+            "marker_color": "rgba(132,204,22,0.75)",
+            "line_color": "rgb(101,163,13)",
+        },
+    ]
+
+
+def _render_progress_toggles(
+    specs: list[dict],
+    key_fn,
+) -> list[dict]:
+    """Render metric switches in rows of 4 and return the enabled specs."""
+    enabled: list[dict] = []
+    for row_start in range(0, len(specs), 4):
+        cols = st.columns(4)
+        for offset, spec in enumerate(specs[row_start:row_start + 4]):
+            with cols[offset]:
+                if st.toggle(
+                    spec["label"],
+                    value=spec["default"],
+                    key=key_fn(spec["key"]),
+                ):
+                    enabled.append(spec)
+    return enabled
+
+
+def _sumup_week_progress_specs(
+    valid_weeks: list[str],
+    sumup_rows: list[dict],
+    *,
+    total_margin_corrected: list[float] | None = None,
+    total_cost_corrected: list[float] | None = None,
+) -> list[dict]:
+    by_week = {str(row["week"]): row for row in sumup_rows}
+
+    def _series(key: str) -> list[float]:
+        values: list[float] = []
+        for week in valid_weeks:
+            row = by_week.get(str(week))
+            if row is None:
+                values.append(float("nan"))
+                continue
+            value = row.get(key, float("nan"))
+            try:
+                values.append(float(value))
+            except (TypeError, ValueError):
+                values.append(float("nan"))
+        return values
+
+    total_stock = _series("total_stock")
+    total_sold = _series("total_sold")
+    total_margin = _series("total_m")
+    total_cost = _series("total_cost")
+    return [
+        {
+            "key": "stock",
+            "label": "Total Stock",
+            "default": True,
+            "title": "Total Stock vs Week",
+            "y_title": "Total Stock",
+            "values": total_stock,
+            "marker_color": "rgba(236,72,153,0.75)",
+            "line_color": "rgb(219,39,119)",
+        },
+        {
+            "key": "count_product",
+            "label": "Total CountProduct",
+            "default": False,
+            "title": "Total CountProduct vs Week",
+            "y_title": "Total CountProduct",
+            "values": _series("total_count_product"),
+            "marker_color": "rgba(249,115,22,0.75)",
+            "line_color": "rgb(234,88,12)",
+        },
+        {
+            "key": "price",
+            "label": "W. Price",
+            "default": True,
+            "title": "W. Price vs Week",
+            "y_title": "W. Price",
+            "values": _series("weighted_price"),
+            "marker_color": "rgba(16,185,129,0.75)",
+            "line_color": "rgb(5,150,105)",
+        },
+        {
+            "key": "purchase",
+            "label": "Total Purchase",
+            "default": False,
+            "title": "Total Purchase vs Week",
+            "y_title": "Total Purchase",
+            "values": _series("total_purchase"),
+            "marker_color": "rgba(6,182,212,0.75)",
+            "line_color": "rgb(8,145,178)",
+        },
+        {
+            "key": "sold",
+            "label": "Total Sold",
+            "default": True,
+            "title": "Total Sold vs Week",
+            "y_title": "Total Sold",
+            "values": total_sold,
+            "marker_color": "rgba(59,130,246,0.75)",
+            "line_color": "rgb(37,99,235)",
+        },
+        {
+            "key": "revenue",
+            "label": "Total Revenue",
+            "default": False,
+            "title": "Total Revenue vs Week",
+            "y_title": "Total Revenue",
+            "values": _series("total_revenue"),
+            "marker_color": "rgba(20,184,166,0.75)",
+            "line_color": "rgb(13,148,136)",
+        },
+        {
+            "key": "margin",
+            "label": "Total Margin",
+            "default": True,
+            "title": "Total Margin vs Week",
+            "y_title": "Total Margin",
+            "values": total_margin,
+            "overlay_values": total_margin_corrected,
+            "overlay_name": "Total Margin Corrected",
+            "marker_color": "rgba(139,92,246,0.75)",
+            "line_color": "rgb(109,40,217)",
+        },
+        {
+            "key": "recap",
+            "label": "Total Recap",
+            "default": False,
+            "title": "Total Recap vs Week",
+            "y_title": "Total Recap",
+            "values": _series("total_recap"),
+            "marker_color": "rgba(245,158,11,0.75)",
+            "line_color": "rgb(217,119,6)",
+        },
+        {
+            "key": "cost",
+            "label": "Total Cost",
+            "default": False,
+            "title": "Total Cost vs Week",
+            "y_title": "Total Cost",
+            "values": total_cost,
+            "overlay_values": total_cost_corrected,
+            "overlay_name": "Cost Corrected",
+            "marker_color": "rgba(107,114,128,0.75)",
+            "line_color": "rgb(75,85,99)",
+        },
+        {
+            "key": "monthly_reserve",
+            "label": "Total Monthly Reserve",
+            "default": False,
+            "title": "Total Monthly Reserve vs Week",
+            "y_title": "Months",
+            "values": _series("total_monthly_reserve"),
+            "marker_color": "rgba(234,179,8,0.75)",
+            "line_color": "rgb(202,138,4)",
+        },
+        {
+            "key": "sold_to_stock",
+            "label": "SoldToStock",
+            "default": False,
+            "title": "SoldToStock vs Week",
+            "y_title": "Sold / Stock",
+            "values": ratio_series(total_sold, total_stock),
+            "marker_color": "rgba(14,165,233,0.75)",
+            "line_color": "rgb(2,132,199)",
+        },
+        {
+            "key": "mtost",
+            "label": "MtoSt",
+            "default": False,
+            "title": "MtoSt vs Week",
+            "y_title": "Margin / Stock",
+            "values": ratio_series(total_margin, total_stock),
+            "overlay_values": (
+                ratio_series(total_margin_corrected, total_stock)
+                if total_margin_corrected is not None
+                else None
+            ),
+            "overlay_name": "MtoSt Corrected",
+            "marker_color": "rgba(6,182,212,0.75)",
+            "line_color": "rgb(8,145,178)",
+        },
+        {
+            "key": "mtosold",
+            "label": "MtoSold",
+            "default": False,
+            "title": "MtoSold vs Week",
+            "y_title": "Margin / Sold",
+            "values": ratio_series(total_margin, total_sold),
+            "overlay_values": (
+                ratio_series(total_margin_corrected, total_sold)
+                if total_margin_corrected is not None
+                else None
+            ),
+            "overlay_name": "MtoSold Corrected",
+            "marker_color": "rgba(132,204,22,0.75)",
+            "line_color": "rgb(101,163,13)",
         },
     ]
 
@@ -315,10 +562,13 @@ def _render_margin_model(
     fit_cost: Linefit,
     scope: dict,
     sk,
+    m_values: list[float] | None = None,
 ) -> None:
 
     def wk(widget_key: str) -> str:
         return sk(widget_key)
+
+    m_series = list(m_values) if m_values is not None else list(ts.m)
 
     set_clmn, result_clmn = st.columns([1, 2])
     with set_clmn.container(border=True):
@@ -354,7 +604,7 @@ def _render_margin_model(
                 week=ts.weeks[week_idx],
                 price_actual=ts.price[week_idx],
                 stock_actual=ts.stock[week_idx],
-                m_actual=ts.m[week_idx],
+                m_actual=m_series[week_idx],
                 fit_sold=fit_sold,
                 fit_cost=fit_cost,
             )
@@ -431,6 +681,7 @@ def _render_sumup_margin_model(
     fit_cost: Linefit,
     scope: dict,
     sk,
+    margin_key: str = "total_m",
 ) -> None:
 
     def wk(widget_key: str) -> str:
@@ -485,7 +736,7 @@ def _render_sumup_margin_model(
                 week=row["week"],
                 price_actual=row["weighted_price"],
                 stock_actual=row["total_stock"],
-                m_actual=row["total_m"],
+                m_actual=row.get(margin_key, row["total_m"]),
                 fit_sold=fit_sold,
                 fit_cost=fit_cost,
             )
@@ -543,6 +794,16 @@ def _parse_float(raw: str, default: float) -> float:
         return float(s)
     except ValueError:
         return default
+
+
+def _parse_optional_float(raw: str) -> float | None:
+    s = str(raw or "").strip()
+    if s == "":
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
 
 def _apply_optional_discount_hist(
@@ -1035,11 +1296,96 @@ def sk(widget_key: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ③ Cluster Overview
+# ③ General settings
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.divider()
-st.subheader("③ Correlation Clusters")
+st.subheader("③ General settings")
+
+with st.expander("Cost Correction", expanded=True):
+    fit_cp_col, _, _, _ = st.columns([1, 1, 1, 3])
+    with fit_cp_col:
+        skip_last_points = int(
+            st.number_input(
+                "Skip last points",
+                min_value=0,
+                value=4,
+                step=1,
+                key=sk("bulk_fit_cost_skip_last"),
+                help=(
+                    "Exclude this many last weeks from Cost vs Price fitting. "
+                    "Same idea as unchecking the latest points in the Cost vs Price expander."
+                ),
+            )
+        )
+        skip_zero_price = st.checkbox(
+            "Skip 0",
+            value=True,
+            key=sk("bulk_fit_cost_skip_zero"),
+            help="Exclude weeks where Price = 0 from Cost vs Price fitting.",
+        )
+        cost_correction_mode = st.selectbox(
+            "Cost correction",
+            list(COST_CORRECTION_MODES),
+            index=COST_CORRECTION_MODES.index(COST_CORRECTION_FROM_LAST_POINT),
+            key=sk("bulk_fit_cost_correction_mode"),
+            help=(
+                "From regression: Cost Corrected = z0 + a·Price. "
+                "From the last point: keep slope a and re-anchor the intercept "
+                "on the last week used in the fit."
+            ),
+        )
+        a_min_raw = st.text_input(
+            "a_min",
+            value="0",
+            key=sk("bulk_fit_cost_a_min"),
+            help="Do not correct this basket if fitted slope a is below a_min. Default 0.",
+        )
+        a_max_raw = st.text_input(
+            "a_max",
+            value="",
+            key=sk("bulk_fit_cost_a_max"),
+            help="Do not correct this basket if fitted slope a is above a_max. Empty = no max.",
+        )
+        correct_margin = st.toggle(
+            "Correct Margin",
+            value=True,
+            key=sk("bulk_fit_cost_correct_margin"),
+            help=(
+                "When on, Fit Cost x Price is calculated automatically and "
+                "Sum-Up / Basket Detail use Margin Corrected."
+            ),
+        )
+    cost_a_min = _parse_float(str(a_min_raw), 0.0)
+    cost_a_max = _parse_optional_float(str(a_max_raw))
+
+if correct_margin:
+    scope["bulk_fit_cost_price"] = fit_bulk_cost_price(
+        result.basket_data,
+        skip_last_points,
+        bool(skip_zero_price),
+    )
+
+basket_corrections = compute_corrections_for_baskets(
+    result.basket_data,
+    scope.get("bulk_fit_cost_price") or {},
+    skip_last_points,
+    bool(skip_zero_price),
+    str(cost_correction_mode),
+    cost_a_min,
+    cost_a_max,
+)
+scope["basket_margin_hybrid"] = hybrid_margin_map(
+    result.basket_data,
+    basket_corrections,
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ④ Cluster Overview
+# ─────────────────────────────────────────────────────────────────────────────
+
+st.divider()
+st.subheader("④ Correlation Clusters")
 
 chart_col, insight_col = st.columns([3, 2])
 
@@ -1084,20 +1430,25 @@ with st.expander("🔵 3D Correlation Space", expanded=False):
     st.plotly_chart(fig3d_cl, use_container_width=True, key=sk("chart_3d_cluster"))
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ④ Basket Table
+# ⑤ Basket Table
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.divider()
-st.subheader("④ Detailed Basket Breakdown")
+st.subheader("⑤ Detailed Basket Breakdown")
+
+price_sold_fits = scope.get("bulk_fit_price_sold") or {}
+price_stock_sold_fits = scope.get("bulk_fit_price_stock_sold") or {}
+cost_price_fits = scope.get("bulk_fit_cost_price") or {}
+show_price_sold_fit = bool(price_sold_fits)
+show_price_stock_sold_fit = bool(price_stock_sold_fits)
+show_cost_price_fit = bool(cost_price_fits)
 
 basket_rows = []
 group_color_map = {"—": 0}
 for b in result.basket_results:
     group_label = result.get_cluster_label(b.group) if b.group > 0 else "—"
     group_color_map[group_label] = b.group
-    price_sold_fit = scope["bulk_fit_price_sold"].get(b.basket, None)
-    price_stock_sold_fit = scope["bulk_fit_price_stock_sold"].get(b.basket, None)
-    basket_rows.append({
+    row = {
         "Basket":      b.basket,
         "Group":       group_label,
         "W. Price":    round(b.weighted_price, 2),
@@ -1107,28 +1458,43 @@ for b in result.basket_results:
         "Avg CountProduct": round(b.average_count_product, 2),
         "Total Purchase": round(b.total_purchase, 2),
         "Sold/Purchase": round(b.total_sold / b.total_purchase, 4) if b.total_purchase > 0 else float("nan"),
-        # "Corr(S/P)":   _fmt3(b.corr_SP),
-        # "Corr(M/P)":   _fmt3(b.corr_MP),
-        # "Corr(M/S)":   _fmt3(b.corr_MS),
-        # "dStock/w":    _fmt2(b.av_dstock_w_qw),
-        # "dStock_b":    _fmt2(b.av_dstock_b_qw),
         "Corr(S/P)":   b.corr_SP,
         "Corr(M/P)":   b.corr_MP,
         "Corr(M/S)":   b.corr_MS,
         "dStock/w":    b.av_dstock_w_qw,
         "dStock_b":    b.av_dstock_b_qw,
-        "Sold~Price z0": price_sold_fit.z0 if price_sold_fit else float("nan"),
-        "Sold~Price a": price_sold_fit.a if price_sold_fit else float("nan"),
-        "Sold~Price R2": price_sold_fit.r2 if price_sold_fit else float("nan"),
-        "Sold~Price+Stock z0": price_stock_sold_fit.z0 if price_stock_sold_fit else float("nan"),
-        "Sold~Price+Stock a": price_stock_sold_fit.a if price_stock_sold_fit else float("nan"),
-        "Sold~Price+Stock b": price_stock_sold_fit.b if price_stock_sold_fit else float("nan"),
-        "Sold~Price+Stock Adj R2": price_stock_sold_fit.adj_r2 if price_stock_sold_fit else float("nan"),
-    })
+    }
+    if show_price_sold_fit:
+        price_sold_fit = price_sold_fits.get(b.basket)
+        row["Sold~Price z0"] = price_sold_fit.z0 if price_sold_fit else float("nan")
+        row["Sold~Price a"] = price_sold_fit.a if price_sold_fit else float("nan")
+        row["Sold~Price R2"] = price_sold_fit.r2 if price_sold_fit else float("nan")
+    if show_price_stock_sold_fit:
+        price_stock_sold_fit = price_stock_sold_fits.get(b.basket)
+        row["Sold~Price+Stock z0"] = (
+            price_stock_sold_fit.z0 if price_stock_sold_fit else float("nan")
+        )
+        row["Sold~Price+Stock a"] = (
+            price_stock_sold_fit.a if price_stock_sold_fit else float("nan")
+        )
+        row["Sold~Price+Stock b"] = (
+            price_stock_sold_fit.b if price_stock_sold_fit else float("nan")
+        )
+        row["Sold~Price+Stock Adj R2"] = (
+            price_stock_sold_fit.adj_r2 if price_stock_sold_fit else float("nan")
+        )
+    if show_cost_price_fit:
+        cost_price_fit = cost_price_fits.get(b.basket)
+        row["Cost~Price z0"] = cost_price_fit.z0 if cost_price_fit else float("nan")
+        row["Cost~Price a"] = cost_price_fit.a if cost_price_fit else float("nan")
+        row["Cost~Price Pl"] = cost_price_fit.pl if cost_price_fit else float("nan")
+        row["Cost~Price R2"] = cost_price_fit.r2 if cost_price_fit else float("nan")
+        row["Cost~Price RMSE"] = cost_price_fit.rmse if cost_price_fit else float("nan")
+    basket_rows.append(row)
 
 df_table = pd.DataFrame(basket_rows)
 
-fit_ps_col, fit_pss_col, exp_col, _ = st.columns([1, 1, 1, 3])
+fit_ps_col, fit_pss_col, fit_cp_col, exp_col, _ = st.columns([1, 1, 1, 1, 2])
 if fit_ps_col.button("Fit Price x Sold", use_container_width=True):
     fitted: dict[str, Linefit] = {}
     for basket_name, ts in result.basket_data.items():
@@ -1145,6 +1511,14 @@ if fit_pss_col.button("Fit Price x Stock x Sold", use_container_width=True):
         if pf is not None:
             fitted_planes[basket_name] = pf
     scope["bulk_fit_price_stock_sold"] = fitted_planes
+    st.rerun()
+
+if fit_cp_col.button("Fit Cost x Price", use_container_width=True):
+    scope["bulk_fit_cost_price"] = fit_bulk_cost_price(
+        result.basket_data,
+        skip_last_points,
+        bool(skip_zero_price),
+    )
     st.rerun()
 
 csv_bytes  = df_table.to_csv(index=False).encode()
@@ -1182,15 +1556,24 @@ def color_group(val):
 
 # 2. Specify which columns to apply this color rule to
 target_columns = ["Corr(S/P)", "Corr(M/P)", "Corr(M/S)", "dStock/w", "dStock_b"]
-fit_columns = [
-    "Sold~Price z0",
-    "Sold~Price a",
-    "Sold~Price R2",
-    "Sold~Price+Stock z0",
-    "Sold~Price+Stock a",
-    "Sold~Price+Stock b",
-    "Sold~Price+Stock Adj R2",
-]
+fit_columns: list[str] = []
+if show_price_sold_fit:
+    fit_columns.extend(["Sold~Price z0", "Sold~Price a", "Sold~Price R2"])
+if show_price_stock_sold_fit:
+    fit_columns.extend([
+        "Sold~Price+Stock z0",
+        "Sold~Price+Stock a",
+        "Sold~Price+Stock b",
+        "Sold~Price+Stock Adj R2",
+    ])
+if show_cost_price_fit:
+    fit_columns.extend([
+        "Cost~Price z0",
+        "Cost~Price a",
+        "Cost~Price Pl",
+        "Cost~Price R2",
+        "Cost~Price RMSE",
+    ])
 
 basket_table_column_config = {
     "Basket": st.column_config.TextColumn(
@@ -1296,6 +1679,31 @@ basket_table_column_config = {
         help="Adjusted R2 goodness-of-fit for the bulk Price and Stock plane model.",
         format="%.4f",
     ),
+    "Cost~Price z0": st.column_config.NumberColumn(
+        "Cost~Price z0",
+        help="Intercept of the bulk line fit: Cost = z0 + a * Price.",
+        format="%.4f",
+    ),
+    "Cost~Price a": st.column_config.NumberColumn(
+        "Cost~Price a",
+        help="Price coefficient of the bulk line fit: Cost = z0 + a * Price.",
+        format="%.4f",
+    ),
+    "Cost~Price Pl": st.column_config.NumberColumn(
+        "Cost~Price Pl",
+        help="Leverage price Pl = z0 / (1 - a) from the bulk Cost vs Price fit.",
+        format="%.4f",
+    ),
+    "Cost~Price R2": st.column_config.NumberColumn(
+        "Cost~Price R2",
+        help="R2 goodness-of-fit for the bulk Cost vs Price line model.",
+        format="%.4f",
+    ),
+    "Cost~Price RMSE": st.column_config.NumberColumn(
+        "Cost~Price RMSE",
+        help="RMSE of the bulk Cost vs Price line model.",
+        format="%.4f",
+    ),
 }
 
 # 3. Chain the styling and string formatting together
@@ -1324,7 +1732,10 @@ tbl_event = st.dataframe(
     height=420,
     on_select="rerun",
     selection_mode="single-row",
-    key=sk("basket_table"),
+    key=sk(
+        f"basket_table_{int(show_price_sold_fit)}_"
+        f"{int(show_price_stock_sold_fit)}_{int(show_cost_price_fit)}"
+    ),
     column_config=basket_table_column_config,
 )
 
@@ -1335,7 +1746,7 @@ if sel_rows:
         scope["selected_basket"] = chosen_basket
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ⑤ Basket Drill-Down
+# ⑥ Basket Drill-Down
 # ─────────────────────────────────────────────────────────────────────────────
 
 if scope["selected_basket"] and scope["selected_basket"] in result.basket_data:
@@ -1343,7 +1754,7 @@ if scope["selected_basket"] and scope["selected_basket"] in result.basket_data:
     basket_name = scope["selected_basket"]
 
     st.divider()
-    st.subheader(f"⑤ Basket Detail: **{basket_name}**")
+    st.subheader(f"⑥ Basket Detail: **{basket_name}**")
 
     ctrl1, ctrl2, ctrl3, _ = st.columns([1, 1, 1, 3])
     show_line = ctrl1.toggle(
@@ -1365,34 +1776,69 @@ if scope["selected_basket"] and scope["selected_basket"] in result.basket_data:
     scope["show_qw_colors"]  = show_qw
     scope["show_qw_average"] = show_qw_avg
 
-    chart_state_key = f"{show_qw}_{show_line}_{show_qw_avg}"
+    bulk_cost_fit = (scope.get("bulk_fit_cost_price") or {}).get(basket_name)
+    cost_correction = basket_corrections.get(basket_name) or compute_cost_margin_correction(
+        ts.price,
+        ts.cost,
+        ts.sold,
+        ts.m,
+        bulk_cost_fit,
+        skip_last_points,
+        bool(skip_zero_price),
+        str(cost_correction_mode),
+        cost_a_min,
+        cost_a_max,
+    )
+    use_margin_corrected = bool(correct_margin) and cost_correction.applied
+    plot_margin = (
+        cost_correction.margin_hybrid if use_margin_corrected else None
+    )
+    skipped_note = ""
+    if use_margin_corrected:
+        skipped_note = (
+            "Note: skipped Cost vs Price weeks use Margin Corrected "
+            "(original margin on kept weeks)."
+        )
+
+    chart_state_key = (
+        f"{show_qw}_{show_line}_{show_qw_avg}_"
+        f"{int(cost_correction.applied)}_{int(use_margin_corrected)}_"
+        f"{cost_correction_mode}_{int(skip_last_points)}"
+    )
 
     week_labels = [str(week) for week in ts.weeks]
     progress_specs = _basket_week_progress_specs(ts)
+    stock_values = _basket_series_values(ts, ts.stock)
 
     with st.expander("📈 Week Progress", expanded=True):
-        wp_row1 = st.columns(4)
-        wp_row2 = st.columns(4)
-        wp_row3 = st.columns(4)
-        enabled_progress: list[dict] = []
-        for idx, spec in enumerate(progress_specs):
-            if idx < 4:
-                row, col_idx = wp_row1, idx
-            elif idx < 8:
-                row, col_idx = wp_row2, idx - 4
-            else:
-                row, col_idx = wp_row3, idx - 8
-            with row[col_idx]:
-                if st.toggle(
-                    spec["label"],
-                    value=spec["default"],
-                    key=sk(f"wp_{spec['key']}_{basket_name}"),
-                ):
-                    enabled_progress.append(spec)
+        enabled_progress = _render_progress_toggles(
+            progress_specs,
+            lambda key: sk(f"wp_{key}_{basket_name}"),
+        )
 
         if enabled_progress:
             prog_cols = st.columns(2)
             for idx, spec in enumerate(enabled_progress):
+                overlay_values = None
+                overlay_name = ""
+                if cost_correction.applied and spec["key"] == "cost_per_sold":
+                    overlay_values = cost_correction.cost_corrected
+                    overlay_name = "Cost Corrected"
+                elif use_margin_corrected and spec["key"] == "margin":
+                    overlay_values = cost_correction.margin_corrected
+                    overlay_name = "Margin Corrected"
+                elif use_margin_corrected and spec["key"] == "mtost":
+                    overlay_values = ratio_series(
+                        cost_correction.margin_hybrid,
+                        stock_values,
+                    )
+                    overlay_name = "MtoSt Corrected"
+                elif use_margin_corrected and spec["key"] == "mtosold":
+                    overlay_values = ratio_series(
+                        cost_correction.margin_hybrid,
+                        ts.sold,
+                    )
+                    overlay_name = "MtoSold Corrected"
                 with prog_cols[idx % 2]:
                     st.plotly_chart(
                         build_metric_progress(
@@ -1406,6 +1852,8 @@ if scope["selected_basket"] and scope["selected_basket"] in result.basket_data:
                             quadweeks=ts.quadweeks,
                             use_qw_colors=show_qw,
                             show_qw_average=show_qw_avg,
+                            overlay_values=overlay_values,
+                            overlay_name=overlay_name,
                         ),
                         use_container_width=True,
                         key=sk(f"wp_chart_{spec['key']}_{basket_name}_{chart_state_key}"),
@@ -1414,12 +1862,15 @@ if scope["selected_basket"] and scope["selected_basket"] in result.basket_data:
             st.caption("Enable at least one metric above to show week progress charts.")
 
     with st.expander("📊 Sold vs Price · Margin vs Price · Margin vs Sold"):
+        if skipped_note:
+            st.caption(skipped_note)
         st.plotly_chart(
             build_basket_scatter_3panel(
                 ts,
                 use_qw_colors=show_qw,
                 show_line=show_line,
                 show_qw_average=show_qw_avg,
+                margin_values=plot_margin,
             ),
             use_container_width=True,
             key=sk(f"scatter_3panel_{basket_name}_{chart_state_key}"),
@@ -1490,12 +1941,15 @@ if scope["selected_basket"] and scope["selected_basket"] in result.basket_data:
     # ── 3D Price × Sold × M ───────────────────────────────────────────────
 
     with st.expander("🌐 3D Overview: Price × Sold × M (Basket Detail)"):
+        if skipped_note:
+            st.caption(skipped_note)
         st.plotly_chart(
             build_3d_price_sold_m(
                 ts,
                 use_qw_colors=show_qw,
                 show_line=show_line,
                 show_qw_average=show_qw_avg,
+                m_values=plot_margin,
             ),
             use_container_width=True,
             key=sk(f"3d_psm_{basket_name}_{chart_state_key}"),
@@ -1576,6 +2030,8 @@ if scope["selected_basket"] and scope["selected_basket"] in result.basket_data:
         saved_margin_model = scope["margin_model"].get(basket_name)
         margin_surface = saved_margin_model["surface"] if saved_margin_model else None
         method_col, scope_col, button_fit_sold_plane_col, _ = st.columns([1, 1, 1, 3])
+        if skipped_note:
+            st.caption(skipped_note)
         st.plotly_chart(
             build_3d_price_stock_m(
                 ts,
@@ -1584,6 +2040,7 @@ if scope["selected_basket"] and scope["selected_basket"] in result.basket_data:
                 planefit=fit_m_res,
                 margin_surface=margin_surface,
                 show_qw_average=show_qw_avg,
+                m_values=plot_margin,
             ),
             use_container_width=True,
             key=sk(f"3d_pstm_{basket_name}_{chart_state_key}"),
@@ -1606,9 +2063,17 @@ if scope["selected_basket"] and scope["selected_basket"] in result.basket_data:
        # st.markdown("**📐 Analytical Margin Optimisation Model**")
         with st.expander("**📐 Analytical Margin Optimisation Model**"):
             fit_sold_ok = scope["fit_sold"].get(basket_name)
-            fit_cost_ok = scope["fit_cost"].get(basket_name)
+            fit_cost_ok = bulk_cost_fit or scope["fit_cost"].get(basket_name)
             if fit_sold_ok and fit_cost_ok:
-                _render_margin_model(basket_name, ts, fit_sold_ok, fit_cost_ok, scope, sk)
+                _render_margin_model(
+                    basket_name,
+                    ts,
+                    fit_sold_ok,
+                    fit_cost_ok,
+                    scope,
+                    sk,
+                    m_values=plot_margin,
+                )
             else:
                 st.info(
                     "To run the model, first fit both:\n"
@@ -1617,14 +2082,20 @@ if scope["selected_basket"] and scope["selected_basket"] in result.basket_data:
                 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ⑥ Sum-Up
+# ⑦ Sum-Up
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.divider()
-st.subheader("⑥ Sum-Up  (All Filtered Baskets)")
+st.subheader("⑦ Sum-Up  (All Filtered Baskets)")
 st.caption("Aggregated values and correlations across all valid baskets, broken down by week.")
 
 sumup_rows = compute_sumup_series(result.weekly_totals, result.all_weeks)
+sumup_rows = enrich_sumup_with_corrected_totals(
+    sumup_rows,
+    result.weekly_totals,
+    result.basket_data,
+    basket_corrections,
+)
 if not sumup_rows:
     st.info("No weekly data to display.")
     st.stop()
@@ -1632,6 +2103,10 @@ if not sumup_rows:
 wp_arr = [r["weighted_price"] for r in sumup_rows]
 ts_arr = [r["total_sold"]     for r in sumup_rows]
 tm_arr = [r["total_m"]        for r in sumup_rows]
+sumup_use_corrected = bool(correct_margin)
+sumup_margin_key = "total_m_corrected" if sumup_use_corrected else "total_m"
+sumup_margin_title = "Total M Corrected" if sumup_use_corrected else "Total M"
+sumup_margin_label = "Total Margin Corrected" if sumup_use_corrected else "Total Margin"
 
 kpi1, kpi2, kpi3 = st.columns(3)
 # kpi1.container(border=True).metric("Overall Corr  Sold vs W. Price", _fmt3(compute_pearson(ts_arr, wp_arr)))
@@ -1656,7 +2131,10 @@ df_sumup = pd.DataFrame([{
     "Total Sold":  round(r["total_sold"], 2),
     "Total Revenue": round(r["total_revenue"], 2),
     "Total Margin": round(r["total_m"], 2),
+    "Total Margin Corrected": round(r["total_m_corrected"], 2),
     "Cost":  round(r["total_cost"], 2),
+    "Cost Corrected": round(r["total_cost_corrected"], 2)
+        if not math.isnan(r["total_cost_corrected"]) else float("nan"),
     "Total Monthly Reserve": round(r["total_monthly_reserve"], 2)
         if not math.isnan(r["total_monthly_reserve"]) else float("nan"),
     "Corr S/P":    _fmt3(r["corr_SP"]),
@@ -1734,7 +2212,9 @@ edited_sumup_raw = st.data_editor(
         "Total Sold",
         "Total Revenue",
         "Total Margin",
+        "Total Margin Corrected",
         "Cost",
+        "Cost Corrected",
         "Total Monthly Reserve",
         "Corr S/P",
         "Corr M/P",
@@ -1799,9 +2279,19 @@ edited_sumup_raw = st.data_editor(
             help="Total margin across all filtered baskets for this week.",
             format="%.2f",
         ),
+        "Total Margin Corrected": st.column_config.NumberColumn(
+            "Total Margin Corrected",
+            help="Sum of per-basket Margin Corrected (hybrid: original on kept weeks, corrected on skipped weeks).",
+            format="%.2f",
+        ),
         "Cost": st.column_config.NumberColumn(
             "Cost",
             help="Estimated total cost: W. Price - Total Margin / Total Sold.",
+            format="%.2f",
+        ),
+        "Cost Corrected": st.column_config.NumberColumn(
+            "Cost Corrected",
+            help="(Revenue - Total Margin Corrected) / Sold.",
             format="%.2f",
         ),
         "Total Monthly Reserve": st.column_config.NumberColumn(
@@ -1877,52 +2367,54 @@ with st.expander("📊 Sum-Up Total", expanded=True):
             key=sk("progress_view_mode"),
         )
         show_stk     = st.toggle("Line + Symbol", True, key=sk("tog_stk"))
+        total_margin_by_week = {r["week"]: r["total_m_corrected"] for r in sumup_rows}
+        total_cost_by_week = {r["week"]: r.get("total_cost_corrected") for r in sumup_rows}
+        total_margin_corrected = (
+            [total_margin_by_week.get(w, float("nan")) for w in valid_weeks]
+            if sumup_use_corrected
+            else None
+        )
+        total_cost_corrected = (
+            [total_cost_by_week.get(w, float("nan")) for w in valid_weeks]
+            if sumup_use_corrected
+            else None
+        )
         stock_totals = [result.weekly_totals[w].sum_stock for w in valid_weeks]
         weighted_prices = [result.weekly_totals[w].weighted_price for w in valid_weeks]
         total_sold = [result.weekly_totals[w].sum_sold for w in valid_weeks]
         total_margin = [result.weekly_totals[w].sum_m for w in valid_weeks]
+        sumup_progress_specs = _sumup_week_progress_specs(
+            valid_weeks,
+            sumup_rows,
+            total_margin_corrected=total_margin_corrected,
+            total_cost_corrected=total_cost_corrected,
+        )
+        enabled_sumup_progress = _render_progress_toggles(
+            sumup_progress_specs,
+            lambda key: sk(f"su_wp_{key}"),
+        )
     
-        if progress_view == "Separate plots":
-            prog_col1, prog_col2 = st.columns(2)
-            with prog_col1:
-                st.plotly_chart(
-                    build_stock_progress(valid_weeks, stock_totals, show_line=show_stk),
-                    use_container_width=True, key=sk("chart_stock"),
-                )
-                st.plotly_chart(
-                    build_metric_progress(
-                        valid_weeks, total_sold,
-                        title="Total Sold vs Week",
-                        y_title="Total Sold",
-                        marker_color="rgba(59,130,246,0.75)",
-                        line_color="rgb(37,99,235)",
-                        show_line=show_stk,
-                    ),
-                    use_container_width=True, key=sk("chart_total_sold_progress"),
-                )
-            with prog_col2:
-                st.plotly_chart(
-                    build_metric_progress(
-                        valid_weeks, weighted_prices,
-                        title="W. Price vs Week",
-                        y_title="W. Price",
-                        marker_color="rgba(16,185,129,0.75)",
-                        line_color="rgb(5,150,105)",
-                        show_line=show_stk,
-                    ),
-                    use_container_width=True, key=sk("chart_weighted_price_progress"),
-                )
-                st.plotly_chart(
-                    build_metric_progress(
-                        valid_weeks, total_margin,
-                        title="Total Margin vs Week",
-                        y_title="Total Margin",
-                        marker_color="rgba(139,92,246,0.75)",
-                        line_color="rgb(109,40,217)",
-                        show_line=show_stk,
-                    ),
-                    use_container_width=True, key=sk("chart_total_margin_progress"),
-                )
+        if not enabled_sumup_progress:
+            st.caption("Enable at least one metric above to show stock progress charts.")
+        elif progress_view == "Separate plots":
+            prog_cols = st.columns(2)
+            for idx, spec in enumerate(enabled_sumup_progress):
+                with prog_cols[idx % 2]:
+                    st.plotly_chart(
+                        build_metric_progress(
+                            valid_weeks,
+                            spec["values"],
+                            title=spec["title"],
+                            y_title=spec["y_title"],
+                            marker_color=spec["marker_color"],
+                            line_color=spec["line_color"],
+                            show_line=show_stk,
+                            overlay_values=spec.get("overlay_values"),
+                            overlay_name=spec.get("overlay_name") or "",
+                        ),
+                        use_container_width=True,
+                        key=sk(f"su_wp_chart_{spec['key']}"),
+                    )
         elif progress_view == "Combined multi-Y-axis plot":
             st.plotly_chart(
                 build_combined_progress(
@@ -1932,18 +2424,28 @@ with st.expander("📊 Sum-Up Total", expanded=True):
                     total_sold,
                     total_margin,
                     show_line=show_stk,
+                    total_margin_corrected=total_margin_corrected,
                 ),
                 use_container_width=True,
                 key=sk("chart_combined_progress"),
             )
+            extra_enabled = [
+                spec["label"]
+                for spec in enabled_sumup_progress
+                if spec["key"] not in {"stock", "price", "sold", "margin"}
+            ]
+            if extra_enabled:
+                st.caption(
+                    "Combined view shows Total Stock, W. Price, Total Sold, and Total Margin. "
+                    "Use Separate plots or Vertical Stack for: "
+                    + ", ".join(extra_enabled)
+                    + "."
+                )
         else:
             st.plotly_chart(
-                build_vertical_stack_progress(
+                build_vertical_stack_from_specs(
                     valid_weeks,
-                    stock_totals,
-                    weighted_prices,
-                    total_sold,
-                    total_margin,
+                    enabled_sumup_progress,
                     show_line=show_stk,
                 ),
                 use_container_width=True,
@@ -1951,12 +2453,17 @@ with st.expander("📊 Sum-Up Total", expanded=True):
             )
     
     with st.expander(
-        "📊 Total Sold vs W. Price · Total M vs W. Price · Total M vs Total Sold",
+        f"📊 Total Sold vs W. Price · {sumup_margin_title} vs W. Price · {sumup_margin_title} vs Total Sold",
         expanded=False,
     ):
         show_su_line = st.toggle("Line + Symbol", value=False, key=sk("tog_su_line"))
         st.plotly_chart(
-            build_sumup_3panel(sumup_rows, show_line=show_su_line),
+            build_sumup_3panel(
+                sumup_rows,
+                show_line=show_su_line,
+                margin_key=sumup_margin_key,
+                margin_title=sumup_margin_title,
+            ),
             use_container_width=True, key=sk("chart_su_3panel"),
         )
     
@@ -2015,9 +2522,14 @@ with st.expander("📊 Sum-Up Total", expanded=True):
             with cost_res_col.container(border=True):
                 _render_linefit_stats(fit_sumup_cost_res)
     
-    with st.expander("🌐 3D: W. Price × Total Sold × Total Margin"):
+    with st.expander(f"🌐 3D: W. Price × Total Sold × {sumup_margin_title}"):
         st.plotly_chart(
-            build_sumup_3d(sumup_rows, show_line=show_su_line),
+            build_sumup_3d(
+                sumup_rows,
+                show_line=show_su_line,
+                margin_key=sumup_margin_key,
+                margin_title=sumup_margin_title,
+            ),
             use_container_width=True, key=sk("chart_su_3d"),
         )
     
@@ -2091,7 +2603,7 @@ with st.expander("📊 Sum-Up Total", expanded=True):
                     label="Total Sold = z₀ + a·W. Price + b·Total Stock",
                 )
     
-    with st.expander("🌐 3D Overview: W. Price × Total Stock × Total Margin + Margin Optimisation"):
+    with st.expander(f"🌐 3D Overview: W. Price × Total Stock × {sumup_margin_label} + Margin Optimisation"):
         saved_sumup_margin_model = scope["sumup_margin_model"]
         sumup_margin_surface = saved_sumup_margin_model["surface"] if saved_sumup_margin_model else None
         st.plotly_chart(
@@ -2099,6 +2611,8 @@ with st.expander("📊 Sum-Up Total", expanded=True):
                 sumup_rows,
                 show_line=show_su_line,
                 margin_surface=sumup_margin_surface,
+                margin_key=sumup_margin_key,
+                margin_title=sumup_margin_label,
             ),
             use_container_width=True,
             key=sk("chart_su_stock_m_3d"),
@@ -2108,7 +2622,10 @@ with st.expander("📊 Sum-Up Total", expanded=True):
             fit_sold_ok = scope["fit_sumup_stock_sold"]
             fit_cost_ok = scope["fit_sumup_cost"]
             if fit_sold_ok and fit_cost_ok:
-                _render_sumup_margin_model(sumup_rows, fit_sold_ok, fit_cost_ok, scope, sk)
+                _render_sumup_margin_model(
+                    sumup_rows, fit_sold_ok, fit_cost_ok, scope, sk,
+                    margin_key=sumup_margin_key,
+                )
             else:
                 st.info(
                     "Fit `Total Sold = f(W. Price, Total Stock)` and "
@@ -2124,6 +2641,7 @@ if scope["selected_week"] and scope["selected_week"] in result.weekly_totals:
         result.basket_data,
         result.weekly_totals,
         selected_week,
+        margin_by_basket=scope.get("basket_margin_hybrid"),
     )
 
     with st.expander(f"📋 Weekly Detail: {selected_week}", expanded=False):
@@ -2167,6 +2685,7 @@ if scope["selected_week"] and scope["selected_week"] in result.weekly_totals:
             discount_hist_category,
             pbs_scope.get("discount_hist_df"),
             input_mode=input_mode,
+            margin_by_basket=scope.get("basket_margin_hybrid"),
         )
 
     with st.expander(f"📅 Week Visualization: {selected_week}", expanded=False):

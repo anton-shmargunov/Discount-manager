@@ -121,10 +121,31 @@ def _basket_prom(ts: BasketTimeSeries, idx: int) -> float:
     return float("nan")
 
 
+def _margin_at_index(
+    ts: BasketTimeSeries,
+    idx: int,
+    margin_by_basket: dict[str, list[float]] | None,
+) -> float:
+    series = None
+    if margin_by_basket:
+        series = margin_by_basket.get(str(ts.basket))
+    if series is not None and idx < len(series):
+        try:
+            value = float(series[idx])
+        except (TypeError, ValueError):
+            value = float("nan")
+        if math.isfinite(value):
+            return value
+    if idx < len(ts.m):
+        return float(ts.m[idx])
+    return float("nan")
+
+
 def compute_basket_week_detail_rows(
     basket_data: dict[str, BasketTimeSeries],
     weekly_totals: dict[str, WeeklyTotal],
     selected_week: str,
+    margin_by_basket: dict[str, list[float]] | None = None,
 ) -> list[dict]:
     """
     Per-basket rows for the selected week — same fields as Sum-Up minus correlations.
@@ -140,6 +161,12 @@ def compute_basket_week_detail_rows(
         price = float(pt.price)
         stock = float(pt.stock)
         margin = float(pt.m)
+        idx = _basket_week_index(ts, selected_week) if ts is not None else None
+        margin_corrected = (
+            _margin_at_index(ts, idx, margin_by_basket)
+            if ts is not None and idx is not None
+            else margin
+        )
         revenue = sold * price
         cost = (
             ((sold * price) - margin) / sold
@@ -149,6 +176,11 @@ def compute_basket_week_detail_rows(
                 if ts is not None
                 else 0.0
             )
+        )
+        cost_corrected = (
+            (revenue - margin_corrected) / sold
+            if sold > 0
+            else float("nan")
         )
 
         rows.append({
@@ -163,7 +195,11 @@ def compute_basket_week_detail_rows(
             "Total Sold": round(sold, 2),
             "Total Revenue": round(revenue, 2),
             "Total Margin": round(margin, 2),
+            "Total Margin Corrected": round(margin_corrected, 2)
+            if math.isfinite(margin_corrected) else float("nan"),
             "Cost": round(cost, 2),
+            "Cost Corrected": round(cost_corrected, 2)
+            if math.isfinite(cost_corrected) else float("nan"),
             "Total Monthly Reserve": round(monthly_reserve(stock, sold), 2)
             if not math.isnan(monthly_reserve(stock, sold))
             else float("nan"),
@@ -643,6 +679,7 @@ def compute_basket_week_discount_rows(
     weekly_totals: dict[str, WeeklyTotal],
     all_weeks: list[str],
     selected_week: str,
+    margin_by_basket: dict[str, list[float]] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """
     Per-basket Week Discount rows with dynamic QW/week column headers.
@@ -719,7 +756,11 @@ def compute_basket_week_discount_rows(
             for off in DISCOUNT_WEEK_OFFSETS
         ]
         margins = [
-            _basket_metric_at_week(ts, weeks_by_offset[off], lambda t, i: t.m[i])
+            _basket_metric_at_week(
+                ts,
+                weeks_by_offset[off],
+                lambda t, i: _margin_at_index(t, i, margin_by_basket),
+            )
             for off in DISCOUNT_WEEK_OFFSETS
         ]
         solds = [
@@ -755,7 +796,11 @@ def compute_basket_week_discount_rows(
         mto_st_qw = _basket_metric_at_week(
             ts,
             week_qw_ago,
-            lambda t, i: t.m[i] / t.stock[i] if t.stock[i] != 0 else float("nan"),
+            lambda t, i: (
+                _margin_at_index(t, i, margin_by_basket) / t.stock[i]
+                if t.stock[i] != 0
+                else float("nan")
+            ),
         )
 
         row: dict = {"Basket": str(pt.basket)}

@@ -15,6 +15,14 @@ from configs.settings import CLUSTER_COLORS, UNCLUSTERED_COLOR
 from visualizations.detail_charts import marker_colors_for_points, add_qw_average_hlines
 
 
+def _is_finite_number(value) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number)
+
+
 # ---------------------------------------------------------------------------
 # Weekly aggregate 3-panel scatter
 # ---------------------------------------------------------------------------
@@ -22,6 +30,8 @@ from visualizations.detail_charts import marker_colors_for_points, add_qw_averag
 def build_sumup_3panel(
     sumup_rows: list[dict],
     show_line: bool = False,
+    margin_key: str = "total_m",
+    margin_title: str = "Total M",
 ) -> go.Figure:
     """
     3-panel scatter for weekly aggregate totals:
@@ -32,15 +42,15 @@ def build_sumup_3panel(
     weeks = [r["week"] for r in sumup_rows]
     wp = [r["weighted_price"] for r in sumup_rows]
     ts = [r["total_sold"] for r in sumup_rows]
-    tm = [r["total_m"] for r in sumup_rows]
+    tm = [r.get(margin_key, r["total_m"]) for r in sumup_rows]
     hover = [f"Week: {r['week']}" for r in sumup_rows]
 
     mode = "lines+markers" if show_line else "markers"
 
     fig = make_subplots(rows=1, cols=3, subplot_titles=[
         "Total Sold vs W. Price",
-        "Total M vs W. Price",
-        "Total M vs Total Sold",
+        f"{margin_title} vs W. Price",
+        f"{margin_title} vs Total Sold",
     ])
 
     for col, (x, y, color) in enumerate([
@@ -59,9 +69,9 @@ def build_sumup_3panel(
     fig.update_xaxes(title_text="W. Price", row=1, col=1)
     fig.update_yaxes(title_text="Total Sold", row=1, col=1)
     fig.update_xaxes(title_text="W. Price", row=1, col=2)
-    fig.update_yaxes(title_text="Total M", row=1, col=2)
+    fig.update_yaxes(title_text=margin_title, row=1, col=2)
     fig.update_xaxes(title_text="Total Sold", row=1, col=3)
-    fig.update_yaxes(title_text="Total M", row=1, col=3)
+    fig.update_yaxes(title_text=margin_title, row=1, col=3)
 
     fig.update_layout(height=320, margin=dict(l=40, r=20, t=50, b=40))
     return fig
@@ -74,15 +84,17 @@ def build_sumup_3panel(
 def build_sumup_3d(
     sumup_rows: list[dict],
     show_line: bool = False,
+    margin_key: str = "total_m",
+    margin_title: str = "Total M",
 ) -> go.Figure:
     """3D scatter: W. Price × Total Sold × Total M (one point per week)."""
     mode = "lines+markers" if show_line else "markers"
     wp = [r["weighted_price"] for r in sumup_rows]
     ts = [r["total_sold"] for r in sumup_rows]
-    tm = [r["total_m"] for r in sumup_rows]
+    tm = [r.get(margin_key, r["total_m"]) for r in sumup_rows]
     texts = [
         f"Week: {r['week']}<br>W. Price: {r['weighted_price']:.2f}<br>"
-        f"Total Sold: {r['total_sold']:.2f}<br>Total M: {r['total_m']:.2f}"
+        f"Total Sold: {r['total_sold']:.2f}<br>{margin_title}: {r.get(margin_key, r['total_m']):.2f}"
         for r in sumup_rows
     ]
 
@@ -94,7 +106,11 @@ def build_sumup_3d(
         text=texts, hoverinfo="text",
     ))
     fig.update_layout(
-        scene=dict(xaxis_title="W. Price", yaxis_title="Total Sold", zaxis_title="Total M"),
+        scene=dict(
+            xaxis_title="W. Price",
+            yaxis_title="Total Sold",
+            zaxis_title=margin_title,
+        ),
         margin=dict(l=0, r=0, b=0, t=0), height=420, showlegend=False,
     )
     return fig
@@ -145,15 +161,17 @@ def build_sumup_stock_m_3d(
     sumup_rows: list[dict],
     show_line: bool = False,
     margin_surface: Optional[tuple[list[float], list[float], list[list[float]]]] = None,
+    margin_key: str = "total_m",
+    margin_title: str = "Total Margin",
 ) -> go.Figure:
     """3D scatter: W. Price × Total Stock × Total Margin (one point per week)."""
     mode = "lines+markers" if show_line else "markers"
     wp = [r["weighted_price"] for r in sumup_rows]
     stock = [r["total_stock"] for r in sumup_rows]
-    margin = [r["total_m"] for r in sumup_rows]
+    margin = [r.get(margin_key, r["total_m"]) for r in sumup_rows]
     texts = [
         f"Week: {r['week']}<br>W. Price: {r['weighted_price']:.2f}<br>"
-        f"Total Stock: {r['total_stock']:.2f}<br>Total Margin: {r['total_m']:.2f}"
+        f"Total Stock: {r['total_stock']:.2f}<br>{margin_title}: {r.get(margin_key, r['total_m']):.2f}"
         for r in sumup_rows
     ]
 
@@ -182,7 +200,11 @@ def build_sumup_stock_m_3d(
         ))
 
     fig.update_layout(
-        scene=dict(xaxis_title="W. Price", yaxis_title="Total Stock", zaxis_title="Total Margin"),
+        scene=dict(
+            xaxis_title="W. Price",
+            yaxis_title="Total Stock",
+            zaxis_title=margin_title,
+        ),
         margin=dict(l=0, r=0, b=0, t=0),
         height=420,
         showlegend=False,
@@ -309,15 +331,18 @@ def build_metric_progress(
     quadweeks: list[str] | None = None,
     use_qw_colors: bool = False,
     show_qw_average: bool = False,
+    overlay_values: list[float] | None = None,
+    overlay_name: str = "",
+    overlay_marker_color: str = "rgba(239,68,68,0.9)",
+    overlay_line_color: str = "rgb(220,38,38)",
 ) -> go.Figure:
     """Generic weekly progress line/scatter chart with categorical YYYY-WW x-axis."""
     mode = "lines+markers" if show_line else "markers"
 
     week_labels = [str(week) for week in weeks]
-    clean_values = [
-        v for v in values
-        if v is not None and not (isinstance(v, float) and math.isnan(v))
-    ]
+    clean_values = [v for v in values if _is_finite_number(v)]
+    if overlay_values:
+        clean_values.extend(v for v in overlay_values if _is_finite_number(v))
     y_min = min(clean_values) if clean_values else 0.0
     y_max = max(clean_values) if clean_values else 1.0
     y_pad = (y_max - y_min) * 0.1 or max(abs(y_min) * 0.05, 1.0)
@@ -331,14 +356,29 @@ def build_metric_progress(
     fig.add_trace(go.Scatter(
         x=week_labels, y=values,
         mode=mode,
+        name=y_title,
         marker=dict(
             color=marker_colors,
             size=7,
             line=dict(width=0.5, color="#111827"),
         ),
         line=dict(color=line_color, width=2),
-        showlegend=False,
+        showlegend=bool(overlay_values),
     ))
+    if overlay_values is not None and len(overlay_values) == len(week_labels):
+        fig.add_trace(go.Scatter(
+            x=week_labels, y=overlay_values,
+            mode=mode,
+            name=overlay_name or "Corrected",
+            marker=dict(
+                color=overlay_marker_color,
+                size=8,
+                symbol="diamond",
+                line=dict(width=0.5, color="#111827"),
+            ),
+            line=dict(color=overlay_line_color, width=2, dash="dash"),
+            showlegend=True,
+        ))
 
     if (
         show_qw_average
@@ -346,6 +386,28 @@ def build_metric_progress(
         and len(quadweeks) == len(values)
     ):
         add_qw_average_hlines(fig, week_labels, values, quadweeks)
+        if overlay_values is not None and len(overlay_values) == len(values):
+            hybrid = []
+            n_corrected = 0
+            for original, overlay in zip(values, overlay_values):
+                if _is_finite_number(overlay):
+                    hybrid.append(float(overlay))
+                    n_corrected += 1
+                else:
+                    hybrid.append(original)
+            if n_corrected:
+                add_qw_average_hlines(
+                    fig,
+                    week_labels,
+                    hybrid,
+                    quadweeks,
+                    dash="dot",
+                    line_color=overlay_line_color,
+                    line_width=3,
+                    name="Corrected Average QW",
+                    hover_label="Corrected Average",
+                    legend_once=True,
+                )
 
     fig.update_layout(
         xaxis_title="Week", yaxis_title=y_title,
@@ -369,6 +431,7 @@ def build_combined_progress(
     total_sold: list[float],
     total_margin: list[float],
     show_line: bool = False,
+    total_margin_corrected: list[float] | None = None,
 ) -> go.Figure:
     """Combined weekly progress chart with four independent y-axes."""
     mode = "lines+markers" if show_line else "markers"
@@ -415,6 +478,24 @@ def build_combined_progress(
                 "Week: %{x}<br>"
                 f"{metric['name']}: "
                 "%{y:,.2f}<extra></extra>"
+            ),
+        ))
+
+    if (
+        total_margin_corrected is not None
+        and len(total_margin_corrected) == len(week_labels)
+    ):
+        fig.add_trace(go.Scatter(
+            x=week_labels,
+            y=total_margin_corrected,
+            mode=mode,
+            name="Total Margin Corrected",
+            yaxis="y4",
+            marker=dict(color="rgb(220,38,38)", size=7, symbol="diamond"),
+            line=dict(color="rgb(220,38,38)", width=2, dash="dash"),
+            hovertemplate=(
+                "Week: %{x}<br>"
+                "Total Margin Corrected: %{y:,.2f}<extra></extra>"
             ),
         ))
 
@@ -472,6 +553,7 @@ def build_vertical_stack_progress(
     total_sold: list[float],
     total_margin: list[float],
     show_line: bool = False,
+    total_margin_corrected: list[float] | None = None,
 ) -> go.Figure:
     """Four vertically stacked weekly progress plots with a shared categorical x-axis."""
     week_labels = [str(week) for week in weeks]
@@ -545,6 +627,27 @@ def build_vertical_stack_progress(
         )
         fig.update_yaxes(title_text=trace["y_title"], row=trace["row"], col=1)
 
+    if (
+        total_margin_corrected is not None
+        and len(total_margin_corrected) == len(week_labels)
+    ):
+        fig.add_trace(
+            go.Scatter(
+                x=week_labels,
+                y=total_margin_corrected,
+                name="Total Margin Corrected",
+                mode=trace_mode,
+                marker=dict(color="rgba(220,38,38,0.9)", size=7, symbol="diamond"),
+                line=dict(color="rgb(220,38,38)", width=2, dash="dash"),
+                hovertemplate=(
+                    "Week: %{x}<br>"
+                    "Total Margin Corrected: %{y:,.2f}<extra></extra>"
+                ),
+            ),
+            row=4,
+            col=1,
+        )
+
     fig.update_xaxes(
         type="category",
         categoryorder="array",
@@ -563,7 +666,88 @@ def build_vertical_stack_progress(
         height=850,
         #overmode="x unified",
         hovermode="x unified",
-        showlegend=False,
+        showlegend=bool(total_margin_corrected),
+        margin=dict(l=60, r=30, t=70, b=80),
+    )
+    return fig
+
+
+def build_vertical_stack_from_specs(
+    weeks: list[str],
+    specs: list[dict],
+    show_line: bool = False,
+) -> go.Figure:
+    """Vertically stacked weekly progress plots driven by metric specs."""
+    week_labels = [str(week) for week in weeks]
+    trace_mode = "lines+markers" if show_line else "lines"
+    n = max(1, len(specs))
+    fig = make_subplots(
+        rows=n,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=min(0.08, 0.35 / n),
+        subplot_titles=tuple(spec.get("title") or spec.get("name", "") for spec in specs),
+    )
+    has_overlay = False
+    for idx, spec in enumerate(specs, start=1):
+        name = spec.get("name") or spec.get("label") or spec.get("y_title", "Value")
+        fig.add_trace(
+            go.Scatter(
+                x=week_labels,
+                y=spec["values"],
+                name=name,
+                mode=trace_mode,
+                marker=dict(color=spec.get("marker_color", "rgba(59,130,246,0.75)"), size=7),
+                line=dict(color=spec.get("line_color", "rgb(37,99,235)"), width=2),
+                hovertemplate=(
+                    "Week: %{x}<br>"
+                    f"{name}: "
+                    "%{y:,.2f}<extra></extra>"
+                ),
+            ),
+            row=idx,
+            col=1,
+        )
+        overlay_values = spec.get("overlay_values")
+        overlay_name = spec.get("overlay_name") or "Corrected"
+        if overlay_values is not None and len(overlay_values) == len(week_labels):
+            has_overlay = True
+            fig.add_trace(
+                go.Scatter(
+                    x=week_labels,
+                    y=overlay_values,
+                    name=overlay_name,
+                    mode=trace_mode,
+                    marker=dict(color="rgba(220,38,38,0.9)", size=7, symbol="diamond"),
+                    line=dict(color="rgb(220,38,38)", width=2, dash="dash"),
+                    hovertemplate=(
+                        "Week: %{x}<br>"
+                        f"{overlay_name}: "
+                        "%{y:,.2f}<extra></extra>"
+                    ),
+                ),
+                row=idx,
+                col=1,
+            )
+        fig.update_yaxes(title_text=spec.get("y_title", ""), row=idx, col=1)
+
+    fig.update_xaxes(
+        type="category",
+        categoryorder="array",
+        categoryarray=week_labels,
+        tickangle=-45,
+        showspikes=True,
+        spikemode="across",
+        spikesnap="cursor",
+        spikethickness=1,
+        spikecolor="rgb(128,128,128)",
+        spikedash="dash",
+    )
+    fig.update_xaxes(title_text="Week", row=n, col=1)
+    fig.update_layout(
+        height=max(360, 160 * n + 80),
+        hovermode="x unified",
+        showlegend=has_overlay,
         margin=dict(l=60, r=30, t=70, b=80),
     )
     return fig

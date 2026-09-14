@@ -62,7 +62,8 @@ from core.optimization.price_optimization import (
     compute_price_max_curve,
 )
 from core.statistics.correlations import compute_pearson
-from core.statistics.metrics import monthly_reserve_series, ratio_series
+from core.statistics.metrics import monthly_reserve_series
+from core.statistics.ratios import ratio_series
 from visualizations.cluster_charts import build_2d_cluster_scatter, build_3d_cluster_scatter
 from visualizations.detail_charts import (
     build_basket_scatter_3panel,
@@ -72,6 +73,7 @@ from visualizations.detail_charts import (
     build_3d_price_stock_m,
     build_price_max_curve,
 )
+from visualizations.progress_stack import build_vertical_stack_from_specs
 from visualizations.sumup_charts import (
     build_combined_progress,
     build_sumup_cost_vs_price,
@@ -80,7 +82,6 @@ from visualizations.sumup_charts import (
     build_sumup_stock_m_3d,
     build_sumup_stock_sold_3d,
     build_metric_progress,
-    build_vertical_stack_from_specs,
     build_weekly_basket_3panel,
     build_weekly_basket_3d,
     build_weekly_basket_stock_sold_3d,

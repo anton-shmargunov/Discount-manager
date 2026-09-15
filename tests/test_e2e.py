@@ -241,7 +241,11 @@ def main():
     from core.analytics.week_basket_tables import (
         compute_week_discount_summary,
         compute_week_discount_weighted_comparison,
+        compute_week_discount_weighted_comparisons,
+        discount_prom_weight_column_labels,
+        weighted_discount_prom_series,
         enrich_week_discount_delta_columns,
+        weighted_discount_prom_series_all,
     )
 
     enriched = enrich_week_discount_delta_columns(discount_rows, wd_filters)
@@ -329,6 +333,101 @@ def main():
     assert set(wd_compare) == {"current_minus_1w", "current", "new"}
     assert "W_Discount" in wd_compare["new"]
     assert "count_Prom" in wd_compare["current"]
+    stock_compare = compute_week_discount_weighted_comparison(
+        enriched, wd_meta, wd_filters, weight_metric="stock",
+    )
+    sold_compare = compute_week_discount_weighted_comparison(
+        enriched, wd_meta, wd_filters, weight_metric="sold",
+    )
+    count_compare = compute_week_discount_weighted_comparison(
+        enriched, wd_meta, wd_filters, weight_metric="count_product",
+    )
+    assert discount_prom_weight_column_labels("stock") == ("W.S. Discount", "W.S. Prom")
+    assert discount_prom_weight_column_labels("count_product") == (
+        "W.C. Discount",
+        "W.C. Prom",
+    )
+    assert discount_prom_weight_column_labels("sold") == (
+        "W.Sold Discount",
+        "W.Sold Prom",
+    )
+    assert stock_compare["current"]["W_Discount"] == wd_compare["current"]["W_Discount"]
+    assert math.isfinite(stock_compare["current"]["W_Discount"])
+    assert math.isfinite(sold_compare["current"]["W_Discount"])
+    synthetic_rows = [
+        {
+            "New Discount": -0.10,
+            "New Prom": 0.02,
+            wd_filters["stock_current"]: 100.0,
+            wd_filters["count_product_current"]: 1.0,
+            wd_filters["sold_current"]: 80.0,
+        },
+        {
+            "New Discount": -0.50,
+            "New Prom": 0.10,
+            wd_filters["stock_current"]: 100.0,
+            wd_filters["count_product_current"]: 9.0,
+            wd_filters["sold_current"]: 20.0,
+        },
+    ]
+    synth_all = compute_week_discount_weighted_comparisons(
+        synthetic_rows, wd_meta, wd_filters,
+    )
+    assert set(synth_all) == {"stock", "count_product", "sold"}
+    synth_stock = synth_all["stock"]
+    synth_sold = synth_all["sold"]
+    synth_count = synth_all["count_product"]
+    assert synth_stock == compute_week_discount_weighted_comparison(
+        synthetic_rows, wd_meta, wd_filters, weight_metric="stock",
+    )
+    assert abs(synth_stock["new"]["W_Discount"] - (-0.30)) < 1e-9
+    assert abs(synth_stock["new"]["W_Prom"] - 0.06) < 1e-9
+    assert abs(synth_sold["new"]["W_Discount"] - (-0.18)) < 1e-9
+    assert abs(synth_sold["new"]["W_Prom"] - 0.036) < 1e-9
+    assert abs(synth_count["new"]["W_Discount"] - (-0.46)) < 1e-9
+    assert abs(synth_count["new"]["W_Prom"] - 0.092) < 1e-9
+    assert synth_count["new"]["count_Prom"] == 2
+
+    from core.models import BasketTimeSeries
+    ts_a = BasketTimeSeries(
+        basket="A",
+        weeks=["2026-20"],
+        quadweeks=["N/A"],
+        sold=[80.0],
+        price=[10.0],
+        m=[1.0],
+        stock=[100.0],
+        cost=[9.0],
+        count_product=[1.0],
+        discount=[-0.10],
+        prom=[0.02],
+    )
+    ts_b = BasketTimeSeries(
+        basket="B",
+        weeks=["2026-20"],
+        quadweeks=["N/A"],
+        sold=[20.0],
+        price=[10.0],
+        m=[1.0],
+        stock=[100.0],
+        cost=[9.0],
+        count_product=[9.0],
+        discount=[-0.50],
+        prom=[0.10],
+    )
+    series_all = weighted_discount_prom_series_all(
+        {"A": ts_a, "B": ts_b}, ["2026-20"],
+    )
+    assert set(series_all) == {"stock", "count_product", "sold"}
+    series_stock_d, series_stock_p = series_all["stock"]
+    series_sold_d, series_sold_p = series_all["sold"]
+    assert series_all["stock"] == weighted_discount_prom_series(
+        {"A": ts_a, "B": ts_b}, ["2026-20"], weight_metric="stock",
+    )
+    assert abs(series_stock_d[0] - (-0.30)) < 1e-9
+    assert abs(series_stock_p[0] - 0.06) < 1e-9
+    assert abs(series_sold_d[0] - (-0.18)) < 1e-9
+    assert abs(series_sold_p[0] - 0.036) < 1e-9
     count_product_cols = [
         col for col in discount_cols if col.startswith("Count Product[")
     ]

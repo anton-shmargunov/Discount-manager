@@ -35,7 +35,13 @@ from core.analytics.cost_correction import (
     fit_bulk_cost_price,
     hybrid_margin_map,
 )
-from core.analytics.week_basket_tables import compute_basket_week_detail_rows
+from core.analytics.week_basket_tables import (
+    DISCOUNT_PROM_WEIGHT_CHOICES,
+    compute_basket_week_detail_rows,
+    discount_prom_weight_key,
+    discount_prom_weight_prefix,
+    weighted_discount_prom_series_all,
+)
 from ui.week_discount_ui import render_week_discount_section
 from ui.project_save_ui import apply_pending_project_restore, render_sidebar_project_panel
 from ui.product_bs_scope import (
@@ -321,6 +327,9 @@ def _sumup_week_progress_specs(
     *,
     total_margin_corrected: list[float] | None = None,
     total_cost_corrected: list[float] | None = None,
+    weight_metric: str = "stock",
+    weighted_discount: list[float] | None = None,
+    weighted_prom: list[float] | None = None,
 ) -> list[dict]:
     by_week = {str(row["week"]): row for row in sumup_rows}
 
@@ -342,6 +351,10 @@ def _sumup_week_progress_specs(
     total_sold = _series("total_sold")
     total_margin = _series("total_m")
     total_cost = _series("total_cost")
+    weight_prefix = discount_prom_weight_prefix(weight_metric)
+    nan_weeks = [float("nan")] * len(valid_weeks)
+    discount_values = weighted_discount if weighted_discount is not None else nan_weeks
+    prom_values = weighted_prom if weighted_prom is not None else nan_weeks
     return [
         {
             "key": "stock",
@@ -372,6 +385,26 @@ def _sumup_week_progress_specs(
             "values": _series("weighted_price"),
             "marker_color": "rgba(16,185,129,0.75)",
             "line_color": "rgb(5,150,105)",
+        },
+        {
+            "key": "discount",
+            "label": "Discount",
+            "default": False,
+            "title": f"{weight_prefix} Discount vs Week",
+            "y_title": "Discount",
+            "values": discount_values,
+            "marker_color": "rgba(244,63,94,0.75)",
+            "line_color": "rgb(225,29,72)",
+        },
+        {
+            "key": "prom",
+            "label": "Prom",
+            "default": False,
+            "title": f"{weight_prefix} Prom vs Week",
+            "y_title": "Prom",
+            "values": prom_values,
+            "marker_color": "rgba(99,102,241,0.75)",
+            "line_color": "rgb(79,70,229)",
         },
         {
             "key": "purchase",
@@ -2367,7 +2400,27 @@ with st.expander("📊 Sum-Up Total", expanded=True):
             horizontal=True,
             key=sk("progress_view_mode"),
         )
-        show_stk     = st.toggle("Line + Symbol", True, key=sk("tog_stk"))
+        show_stk = st.toggle("Line + Symbol", True, key=sk("tog_stk"))
+        all_weighted_series = weighted_discount_prom_series_all(
+            result.basket_data,
+            valid_weeks,
+        )
+        weight_col, _ = st.columns([2, 10])
+        weight_label = weight_col.selectbox(
+            "Weights",
+            list(DISCOUNT_PROM_WEIGHT_CHOICES),
+            index=0,
+            key=sk("su_wp_weight"),
+            help=(
+                "Show precomputed Discount and Prom weighted by Stock, "
+                "CountProduct, or Sold across baskets in each week."
+            ),
+        )
+        weight_metric = discount_prom_weight_key(weight_label)
+        weighted_discount, weighted_prom = all_weighted_series.get(
+            weight_metric,
+            all_weighted_series["stock"],
+        )
         total_margin_by_week = {r["week"]: r["total_m_corrected"] for r in sumup_rows}
         total_cost_by_week = {r["week"]: r.get("total_cost_corrected") for r in sumup_rows}
         total_margin_corrected = (
@@ -2389,6 +2442,9 @@ with st.expander("📊 Sum-Up Total", expanded=True):
             sumup_rows,
             total_margin_corrected=total_margin_corrected,
             total_cost_corrected=total_cost_corrected,
+            weight_metric=weight_metric,
+            weighted_discount=weighted_discount,
+            weighted_prom=weighted_prom,
         )
         enabled_sumup_progress = _render_progress_toggles(
             sumup_progress_specs,
@@ -2414,7 +2470,7 @@ with st.expander("📊 Sum-Up Total", expanded=True):
                             overlay_name=spec.get("overlay_name") or "",
                         ),
                         use_container_width=True,
-                        key=sk(f"su_wp_chart_{spec['key']}"),
+                        key=sk(f"su_wp_chart_{spec['key']}_{weight_metric}"),
                     )
         elif progress_view == "Combined multi-Y-axis plot":
             st.plotly_chart(
@@ -2450,7 +2506,7 @@ with st.expander("📊 Sum-Up Total", expanded=True):
                     show_line=show_stk,
                 ),
                 use_container_width=True,
-                key=sk("chart_stacked_progress"),
+                key=sk(f"chart_stacked_progress_{weight_metric}"),
             )
     
     with st.expander(

@@ -37,6 +37,7 @@ from core.analytics.prom_strategy import (
 from core.analytics.week_basket_tables import (
     D_DISCOUNT_COLUMN,
     D_PROM_COLUMN,
+    DISCOUNT_PROM_WEIGHT_CHOICES,
     NEW_DISCOUNT_COLUMN,
     NEW_PROM_COLUMN,
     WeekDiscountViewSettings,
@@ -44,7 +45,9 @@ from core.analytics.week_basket_tables import (
     build_week_discount_column_meta,
     compute_basket_week_discount_rows,
     compute_week_discount_summary,
-    compute_week_discount_weighted_comparison,
+    compute_week_discount_weighted_comparisons,
+    discount_prom_weight_column_labels,
+    discount_prom_weight_key,
     expand_week_discount_export_rows,
     normalize_week_discount_export_rows,
     format_week_discount_value,
@@ -1225,7 +1228,7 @@ def render_week_discount_section(
         filtered_rows,
         week_discount_filter_map,
     )
-    comparison = compute_week_discount_weighted_comparison(
+    all_comparisons = compute_week_discount_weighted_comparisons(
         filtered_rows,
         week_discount_meta,
         week_discount_filter_map,
@@ -1238,27 +1241,45 @@ def render_week_discount_section(
     sum_col4.metric("min (dProm)", _fmt_pct(summary["min_dProm"]))
 
     with st.container(border=True):
+        weight_col, _ = st.columns([2, 10])
+        weight_label = weight_col.selectbox(
+            "Weights",
+            list(DISCOUNT_PROM_WEIGHT_CHOICES),
+            index=0,
+            key=wk("wd_weight_metric"),
+            help=(
+                "Show precomputed Discount and Prom weighted by Stock, "
+                "CountProduct, or Sold for Current − 1W, Current, and New."
+            ),
+        )
+        weight_metric = discount_prom_weight_key(weight_label)
+        discount_col_label, prom_col_label = discount_prom_weight_column_labels(
+            weight_metric
+        )
+        comparison = all_comparisons.get(weight_metric, all_comparisons["stock"])
         st.caption(
-            "W.S. Discount = stock-weighted · W.C. Prom = count-product-weighted · "
-            "compare across Current − 1W, Current, and New"
+            f"{discount_col_label} and {prom_col_label} use {weight_label} weights "
+            "across Current − 1W, Current, and New."
         )
         comparison_rows = [
             {
                 "Period": "Current - 1W",
-                "W.S. Discount": _fmt_pct(comparison["current_minus_1w"]["W_Discount"]),
-                "W.C. Prom": _fmt_pct(comparison["current_minus_1w"]["W_Prom"]),
+                discount_col_label: _fmt_pct(
+                    comparison["current_minus_1w"]["W_Discount"]
+                ),
+                prom_col_label: _fmt_pct(comparison["current_minus_1w"]["W_Prom"]),
                 "count (Prom)": str(comparison["current_minus_1w"]["count_Prom"]),
             },
             {
                 "Period": "Current",
-                "W.S. Discount": _fmt_pct(comparison["current"]["W_Discount"]),
-                "W.C. Prom": _fmt_pct(comparison["current"]["W_Prom"]),
+                discount_col_label: _fmt_pct(comparison["current"]["W_Discount"]),
+                prom_col_label: _fmt_pct(comparison["current"]["W_Prom"]),
                 "count (Prom)": str(comparison["current"]["count_Prom"]),
             },
             {
                 "Period": "New",
-                "W.S. Discount": _fmt_pct(comparison["new"]["W_Discount"]),
-                "W.C. Prom": _fmt_pct(comparison["new"]["W_Prom"]),
+                discount_col_label: _fmt_pct(comparison["new"]["W_Discount"]),
+                prom_col_label: _fmt_pct(comparison["new"]["W_Prom"]),
                 "count (Prom)": str(comparison["new"]["count_Prom"]),
             },
         ]
@@ -1266,5 +1287,7 @@ def render_week_discount_section(
             pd.DataFrame(comparison_rows),
             use_container_width=True,
             hide_index=True,
-            key=wk(f"wd_weighted_compare_{selected_week}_{table_state_key}"),
+            key=wk(
+                f"wd_weighted_compare_{selected_week}_{weight_metric}_{table_state_key}"
+            ),
         )

@@ -37,7 +37,6 @@ from core.analytics.prom_strategy import (
 from core.analytics.week_basket_tables import (
     D_DISCOUNT_COLUMN,
     D_PROM_COLUMN,
-    DISCOUNT_PROM_WEIGHT_CHOICES,
     NEW_DISCOUNT_COLUMN,
     NEW_PROM_COLUMN,
     WeekDiscountViewSettings,
@@ -45,9 +44,6 @@ from core.analytics.week_basket_tables import (
     build_week_discount_column_meta,
     compute_basket_week_discount_rows,
     compute_week_discount_summary,
-    compute_week_discount_weighted_comparisons,
-    discount_prom_weight_column_labels,
-    discount_prom_weight_key,
     expand_week_discount_export_rows,
     normalize_week_discount_export_rows,
     format_week_discount_value,
@@ -57,6 +53,12 @@ from core.analytics.week_basket_tables import (
     week_discount_filter_columns,
     week_discount_filter_label_kind,
     week_discount_value_kind,
+)
+from core.analytics.weighted_discount import (
+    DISCOUNT_PROM_WEIGHT_CHOICES,
+    compute_week_discount_weighted_comparisons,
+    discount_prom_weight_column_labels,
+    discount_prom_weight_key,
 )
 from configs.settings import FULL_BASKET_LIST_PATH, STRATEGIES_V1_PATH
 from ui.product_bs_scope import (

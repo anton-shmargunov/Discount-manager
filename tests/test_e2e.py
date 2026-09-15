@@ -238,14 +238,16 @@ def main():
     moderate_table = StrategyTable("Moderate", default_moderate_bins())
     assert lookup_strategy_d_discount(-0.55, moderate_table) == 0.05
     assert lookup_strategy_d_discount(-0.40, moderate_table) == 0.04
-    from core.analytics.week_basket_tables import (
-        compute_week_discount_summary,
+    from core.analytics.weighted_discount import (
         compute_week_discount_weighted_comparison,
         compute_week_discount_weighted_comparisons,
         discount_prom_weight_column_labels,
         weighted_discount_prom_series,
-        enrich_week_discount_delta_columns,
         weighted_discount_prom_series_all,
+    )
+    from core.analytics.week_basket_tables import (
+        compute_week_discount_summary,
+        enrich_week_discount_delta_columns,
     )
 
     enriched = enrich_week_discount_delta_columns(discount_rows, wd_filters)

@@ -43,6 +43,13 @@ def paired_values_skipping_zero_x(
     kept_x: list[float] = []
     kept_y: list[float] = []
     for xv, yv in zip(xs, ys):
+        try:
+            x_num = float(xv)
+            y_num = float(yv)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(x_num) or not math.isfinite(y_num):
+            continue
         if xv == 0:
             continue
         kept_x.append(xv)

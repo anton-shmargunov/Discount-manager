@@ -14,6 +14,7 @@ from core.models import WeeklyTotal, BasketResult, Planefit, Linefit
 from configs.settings import CLUSTER_COLORS, UNCLUSTERED_COLOR
 from visualizations.detail_charts import marker_colors_for_points, add_qw_average_hlines
 from visualizations.progress_stack import build_vertical_stack_from_specs
+from core.transforms.metric_filters import finite_minmax
 
 
 def _is_finite_number(value) -> bool:
@@ -250,7 +251,7 @@ def build_sumup_cost_vs_price(
     ))
 
     if linefit is not None and wp:
-        x_min, x_max = min(wp), max(wp)
+        x_min, x_max = finite_minmax(wp)
         pad = (x_max - x_min) * 0.1 or 1.0
         x0, x1 = x_min - pad, x_max + pad
         fig.add_trace(go.Scatter(
@@ -280,10 +281,12 @@ def _add_sumup_plane_surface(
     surface_color: str,
 ) -> None:
     """Add a fitted plane surface to a Sum-Up 3D figure."""
-    x_pad = (max(x) - min(x)) * 0.1 or 1.0
-    y_pad = (max(y) - min(y)) * 0.1 or 1.0
-    x0, x1 = min(x) - x_pad, max(x) + x_pad
-    y0, y1 = min(y) - y_pad, max(y) + y_pad
+    x_min, x_max = finite_minmax(x)
+    y_min, y_max = finite_minmax(y)
+    x_pad = (x_max - x_min) * 0.1 or 1.0
+    y_pad = (y_max - y_min) * 0.1 or 1.0
+    x0, x1 = x_min - x_pad, x_max + x_pad
+    y0, y1 = y_min - y_pad, y_max + y_pad
     z_grid = [
         [fit.z0 + fit.a * x0 + fit.b * y0, fit.z0 + fit.a * x1 + fit.b * y0],
         [fit.z0 + fit.a * x0 + fit.b * y1, fit.z0 + fit.a * x1 + fit.b * y1],
@@ -358,6 +361,7 @@ def build_metric_progress(
         x=week_labels, y=values,
         mode=mode,
         name=y_title,
+        connectgaps=False,
         marker=dict(
             color=marker_colors,
             size=7,

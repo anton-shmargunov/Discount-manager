@@ -10,6 +10,7 @@ import numpy as np
 from typing import Sequence
 
 from configs.settings import MIN_POINTS_FOR_CORRELATION
+from core.transforms.metric_filters import finite_aligned
 
 
 def compute_pearson(x: Sequence[float], y: Sequence[float]) -> float:
@@ -17,15 +18,16 @@ def compute_pearson(x: Sequence[float], y: Sequence[float]) -> float:
     Pearson correlation coefficient between two equal-length sequences.
 
     Returns NaN when:
-    - fewer than MIN_POINTS_FOR_CORRELATION data points,
+    - fewer than MIN_POINTS_FOR_CORRELATION finite pairs,
     - either series has zero variance.
     """
-    n = len(x)
+    pairs = finite_aligned(x, y)
+    n = len(pairs)
     if n < MIN_POINTS_FOR_CORRELATION:
         return float("nan")
 
-    x_arr = np.asarray(x, dtype=float)
-    y_arr = np.asarray(y, dtype=float)
+    x_arr = np.asarray([row[0] for row in pairs], dtype=float)
+    y_arr = np.asarray([row[1] for row in pairs], dtype=float)
 
     if x_arr.std() == 0.0 or y_arr.std() == 0.0:
         return float("nan")

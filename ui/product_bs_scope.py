@@ -45,6 +45,7 @@ def default_product_bs_scope_state() -> dict[str, Any]:
     return {
         "analysis": None,
         "selected_basket": None,
+        "selected_baskets": [],
         "selected_week": None,
         "show_line": False,
         "show_qw_colors": False,
@@ -77,6 +78,7 @@ def get_product_bs_scope(session_state: Any, scope_key: str) -> dict[str, Any]:
 def clear_product_bs_scope_derived(scope: dict[str, Any]) -> None:
     """Reset selections and derived UI state after a rebuild."""
     scope["selected_basket"] = None
+    scope["selected_baskets"] = []
     scope["selected_week"] = None
     scope["show_line"] = False
     scope["show_qw_colors"] = False

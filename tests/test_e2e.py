@@ -239,6 +239,8 @@ def main():
     assert lookup_strategy_d_discount(-0.55, moderate_table) == 0.05
     assert lookup_strategy_d_discount(-0.40, moderate_table) == 0.04
     from core.analytics.weighted_discount import (
+        aggregate_selected_basket_weeks,
+        combined_basket_time_series,
         compute_week_discount_weighted_comparison,
         compute_week_discount_weighted_comparisons,
         discount_prom_weight_column_labels,
@@ -401,8 +403,10 @@ def main():
         stock=[100.0],
         cost=[9.0],
         count_product=[1.0],
+        purchase=[5.0],
         discount=[-0.10],
         prom=[0.02],
+        recap=[3.0],
     )
     ts_b = BasketTimeSeries(
         basket="B",
@@ -414,8 +418,10 @@ def main():
         stock=[100.0],
         cost=[9.0],
         count_product=[9.0],
+        purchase=[15.0],
         discount=[-0.50],
         prom=[0.10],
+        recap=[7.0],
     )
     series_all = weighted_discount_prom_series_all(
         {"A": ts_a, "B": ts_b}, ["2026-20"],
@@ -430,6 +436,34 @@ def main():
     assert abs(series_stock_p[0] - 0.06) < 1e-9
     assert abs(series_sold_d[0] - (-0.18)) < 1e-9
     assert abs(series_sold_p[0] - 0.036) < 1e-9
+    selected_agg = aggregate_selected_basket_weeks(
+        {"A": ts_a, "B": ts_b},
+        ["A", "B"],
+        ["2026-20"],
+    )
+    assert abs(selected_agg["stock"][0] - 200.0) < 1e-9
+    assert abs(selected_agg["count_product"][0] - 10.0) < 1e-9
+    assert abs(selected_agg["purchase"][0] - 20.0) < 1e-9
+    assert abs(selected_agg["sold"][0] - 100.0) < 1e-9
+    assert abs(selected_agg["revenue"][0] - 1000.0) < 1e-9
+    assert abs(selected_agg["weighted_price"][0] - 10.0) < 1e-9
+    assert abs(selected_agg["margin"][0] - 2.0) < 1e-9
+    assert abs(selected_agg["recap"][0] - 10.0) < 1e-9
+    assert abs(selected_agg["cost"][0] - 9.98) < 1e-9
+    assert abs(selected_agg["sold_to_stock"][0] - 0.5) < 1e-9
+    assert abs(selected_agg["mtost"][0] - 0.01) < 1e-9
+    assert abs(selected_agg["mtosold"][0] - 0.02) < 1e-9
+    assert abs(selected_agg["monthly_reserve"][0] - (200.0 / 100.0 * 7.0 / 30.0)) < 1e-9
+    assert abs(selected_agg["discount_by_weight"]["stock"][0] - (-0.30)) < 1e-9
+    assert abs(selected_agg["prom_by_weight"]["sold"][0] - 0.036) < 1e-9
+    combo_ts = combined_basket_time_series(selected_agg, basket="Combination")
+    assert combo_ts.basket == "Combination"
+    assert combo_ts.weeks == ["2026-20"]
+    assert abs(combo_ts.price[0] - 10.0) < 1e-9
+    assert abs(combo_ts.sold[0] - 100.0) < 1e-9
+    assert abs(combo_ts.stock[0] - 200.0) < 1e-9
+    assert abs(combo_ts.m[0] - 2.0) < 1e-9
+    assert abs(combo_ts.cost[0] - 9.98) < 1e-9
     count_product_cols = [
         col for col in discount_cols if col.startswith("Count Product[")
     ]
@@ -1009,6 +1043,77 @@ def main():
         raise AssertionError("Blank-price tracking row should be filtered by min_price=0.001")
     except ValueError as exc:
         assert "No baskets passed" in str(exc)
+
+    targeted_tracking = pd.DataFrame({
+        "quadweek": [19, 19],
+        "year_week": ["2026-23", "2026-24"],
+        "basket": ["2222", "2222"],
+        "StockQty_W": [100.0, 50.0],
+        "CountProduct_W": [1, 1],
+        "PurchaseQty": [5, 5],
+        "SoldQty": [80.0, 20.0],
+        "Margin": [8.0, 2.0],
+        "AvgSalePrice": [10.0, 0.0],
+    })
+    targeted_general = run_tracking_report_analysis(
+        targeted_tracking, min_price=0.001, filter_level="General",
+    )
+    general_ts = targeted_general.basket_data["2222"]
+    general_row = next(b for b in targeted_general.basket_results if b.basket == "2222")
+    assert general_ts.weeks == ["2026-23"], general_ts.weeks
+    assert abs(general_row.total_sold - 80.0) < 1e-9
+    assert abs(general_row.total_m - 8.0) < 1e-9
+    assert abs(general_row.weighted_price - 10.0) < 1e-9
+    assert abs(general_row.average_stock - 100.0) < 1e-9
+    targeted_result = run_tracking_report_analysis(
+        targeted_tracking, min_price=0.001, filter_level="Targeted",
+    )
+    targeted_ts = targeted_result.basket_data["2222"]
+    targeted_row = next(b for b in targeted_result.basket_results if b.basket == "2222")
+    assert targeted_ts.weeks == ["2026-23", "2026-24"], targeted_ts.weeks
+    assert math.isnan(targeted_ts.price[1])
+    assert abs(targeted_ts.sold[1] - 20.0) < 1e-9
+    assert abs(targeted_ts.stock[1] - 50.0) < 1e-9
+    assert abs(targeted_ts.m[1] - 2.0) < 1e-9
+    assert math.isnan(targeted_ts.cost[1])
+    assert abs(targeted_row.total_sold - 100.0) < 1e-9
+    assert abs(targeted_row.total_m - 10.0) < 1e-9
+    assert abs(targeted_row.weighted_price - 10.0) < 1e-9
+    assert abs(targeted_row.average_stock - 75.0) < 1e-9
+    targeted_sumup = compute_sumup_series(
+        targeted_result.weekly_totals, targeted_result.all_weeks,
+    )
+    week_24 = next(row for row in targeted_sumup if row["week"] == "2026-24")
+    assert abs(week_24["total_stock"] - 50.0) < 1e-9
+    assert abs(week_24["total_sold"] - 20.0) < 1e-9
+    assert math.isnan(week_24["weighted_price"]) or abs(week_24["weighted_price"]) < 1e-12
+
+    both_tracking = pd.DataFrame({
+        "quadweek": [19, 19, 19],
+        "year_week": ["2026-23", "2026-24", "2026-25"],
+        "basket": ["3333", "3333", "3333"],
+        "StockQty_W": [100.0, 50.0, 40.0],
+        "CountProduct_W": [1, 1, 1],
+        "PurchaseQty": [5, 5, 5],
+        "SoldQty": [80.0, 20.0, 60.0],
+        "Margin": [8.0, 2.0, 6.0],
+        "AvgSalePrice": [10.0, 0.0, 0.0],
+    })
+    both_result = run_tracking_report_analysis(
+        both_tracking,
+        general_filters={"min_sold": 50.0},
+        targeted_filters={"min_price": 0.001},
+    )
+    both_ts = both_result.basket_data["3333"]
+    both_row = next(b for b in both_result.basket_results if b.basket == "3333")
+    assert both_ts.weeks == ["2026-23", "2026-25"], both_ts.weeks
+    assert abs(both_ts.price[0] - 10.0) < 1e-9
+    assert math.isnan(both_ts.price[1])
+    assert abs(both_ts.sold[1] - 60.0) < 1e-9
+    assert abs(both_ts.stock[1] - 40.0) < 1e-9
+    assert abs(both_row.total_sold - 140.0) < 1e-9
+    assert abs(both_row.weighted_price - 10.0) < 1e-9
+    assert abs(both_row.average_stock - 70.0) < 1e-9
 
     # ── TrackingBaskets_v2 product_BS input ────────────────────────────────
     print("\nRunning TrackingBaskets_v2 product_BS report analysis...")

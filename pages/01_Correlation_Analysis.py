@@ -10,6 +10,7 @@ No analytical logic lives here.
 """
 
 from __future__ import annotations
+import hashlib
 import math
 import io
 from pathlib import Path
@@ -38,6 +39,8 @@ from core.analytics.cost_correction import (
 from core.analytics.week_basket_tables import compute_basket_week_detail_rows
 from core.analytics.weighted_discount import (
     DISCOUNT_PROM_WEIGHT_CHOICES,
+    aggregate_selected_basket_weeks,
+    combined_basket_time_series,
     discount_prom_weight_key,
     discount_prom_weight_prefix,
     weighted_discount_prom_series_all,
@@ -57,6 +60,13 @@ from ui.product_bs_scope import (
     scoped_widget_key,
 )
 from core.transforms.data_prep import merge_discount_hist_dataframes
+from core.transforms.metric_filters import (
+    FILTER_LEVEL_CHOICES,
+    FILTER_LEVEL_GENERAL,
+    FILTER_LEVEL_TARGETED,
+    finite_minmax,
+    normalize_filter_level,
+)
 from core.models import BasketTimeSeries, Planefit, Linefit
 from core.modeling.regression import (
     fit_plane,
@@ -302,6 +312,169 @@ def _basket_week_progress_specs(ts: BasketTimeSeries) -> list[dict]:
     ]
 
 
+def _selected_baskets_week_progress_specs(
+    agg: dict[str, object],
+    weight_metric: str = "stock",
+) -> list[dict]:
+    weight_prefix = discount_prom_weight_prefix(weight_metric)
+    discounts = agg.get("discount_by_weight") or {}
+    proms = agg.get("prom_by_weight") or {}
+    discount_values = discounts.get(weight_metric, discounts.get("stock", []))
+    prom_values = proms.get(weight_metric, proms.get("stock", []))
+    return [
+        {
+            "key": "stock",
+            "label": "Stock",
+            "default": True,
+            "title": "Stock vs Week",
+            "y_title": "Stock Qty",
+            "values": agg["stock"],
+            "marker_color": "rgba(236,72,153,0.75)",
+            "line_color": "rgb(219,39,119)",
+        },
+        {
+            "key": "count_product",
+            "label": "CountProduct",
+            "default": False,
+            "title": "CountProduct vs Week",
+            "y_title": "CountProduct",
+            "values": agg["count_product"],
+            "marker_color": "rgba(249,115,22,0.75)",
+            "line_color": "rgb(234,88,12)",
+        },
+        {
+            "key": "price",
+            "label": "Price",
+            "default": True,
+            "title": "W. Price vs Week",
+            "y_title": "W. Price",
+            "values": agg["weighted_price"],
+            "marker_color": "rgba(16,185,129,0.75)",
+            "line_color": "rgb(5,150,105)",
+        },
+        {
+            "key": "discount",
+            "label": "Discount",
+            "default": False,
+            "title": f"{weight_prefix} Discount vs Week",
+            "y_title": "Discount",
+            "values": discount_values,
+            "marker_color": "rgba(244,63,94,0.75)",
+            "line_color": "rgb(225,29,72)",
+        },
+        {
+            "key": "prom",
+            "label": "Prom",
+            "default": False,
+            "title": f"{weight_prefix} Prom vs Week",
+            "y_title": "Prom",
+            "values": prom_values,
+            "marker_color": "rgba(99,102,241,0.75)",
+            "line_color": "rgb(79,70,229)",
+        },
+        {
+            "key": "purchase",
+            "label": "Purchase",
+            "default": False,
+            "title": "Purchase vs Week",
+            "y_title": "Purchase Qty",
+            "values": agg["purchase"],
+            "marker_color": "rgba(6,182,212,0.75)",
+            "line_color": "rgb(8,145,178)",
+        },
+        {
+            "key": "sold",
+            "label": "Sold",
+            "default": True,
+            "title": "Sold vs Week",
+            "y_title": "Sold Qty",
+            "values": agg["sold"],
+            "marker_color": "rgba(59,130,246,0.75)",
+            "line_color": "rgb(37,99,235)",
+        },
+        {
+            "key": "revenue",
+            "label": "Revenue",
+            "default": False,
+            "title": "Revenue vs Week",
+            "y_title": "Revenue",
+            "values": agg["revenue"],
+            "marker_color": "rgba(20,184,166,0.75)",
+            "line_color": "rgb(13,148,136)",
+        },
+        {
+            "key": "margin",
+            "label": "Margin",
+            "default": True,
+            "title": "Margin vs Week",
+            "y_title": "Margin",
+            "values": agg["margin"],
+            "marker_color": "rgba(139,92,246,0.75)",
+            "line_color": "rgb(109,40,217)",
+        },
+        {
+            "key": "recap",
+            "label": "Recap",
+            "default": False,
+            "title": "Recap vs Week",
+            "y_title": "Recap",
+            "values": agg["recap"],
+            "marker_color": "rgba(245,158,11,0.75)",
+            "line_color": "rgb(217,119,6)",
+        },
+        {
+            "key": "cost_per_sold",
+            "label": "Cost/Sold",
+            "default": False,
+            "title": "Cost per Sold vs Week",
+            "y_title": "Cost per Sold",
+            "values": agg["cost"],
+            "marker_color": "rgba(107,114,128,0.75)",
+            "line_color": "rgb(75,85,99)",
+        },
+        {
+            "key": "monthly_reserve",
+            "label": "Monthly Reserve",
+            "default": False,
+            "title": "Monthly Reserve vs Week",
+            "y_title": "Months",
+            "values": agg["monthly_reserve"],
+            "marker_color": "rgba(234,179,8,0.75)",
+            "line_color": "rgb(202,138,4)",
+        },
+        {
+            "key": "sold_to_stock",
+            "label": "SoldToStock",
+            "default": False,
+            "title": "SoldToStock vs Week",
+            "y_title": "Sold / Stock",
+            "values": agg["sold_to_stock"],
+            "marker_color": "rgba(14,165,233,0.75)",
+            "line_color": "rgb(2,132,199)",
+        },
+        {
+            "key": "mtost",
+            "label": "MtoSt",
+            "default": False,
+            "title": "MtoSt vs Week",
+            "y_title": "Margin / Stock",
+            "values": agg["mtost"],
+            "marker_color": "rgba(6,182,212,0.75)",
+            "line_color": "rgb(8,145,178)",
+        },
+        {
+            "key": "mtosold",
+            "label": "MtoSold",
+            "default": False,
+            "title": "MtoSold vs Week",
+            "y_title": "Margin / Sold",
+            "values": agg["mtosold"],
+            "marker_color": "rgba(132,204,22,0.75)",
+            "line_color": "rgb(101,163,13)",
+        },
+    ]
+
+
 def _render_progress_toggles(
     specs: list[dict],
     key_fn,
@@ -319,6 +492,20 @@ def _render_progress_toggles(
                 ):
                     enabled.append(spec)
     return enabled
+
+
+def _detail_baskets_from_scope(scope: dict, basket_data: dict) -> list[str]:
+    names = [
+        str(name)
+        for name in (scope.get("selected_baskets") or [])
+        if str(name) in basket_data
+    ]
+    if names:
+        return names
+    one = scope.get("selected_basket")
+    if one and str(one) in basket_data:
+        return [str(one)]
+    return []
 
 
 def _sumup_week_progress_specs(
@@ -620,15 +807,17 @@ def _render_margin_model(
         week_idx = week_options[selected_label]
 
         mc1, mc2 = st.columns(2)
-        p_range = max(ts.price) - min(ts.price) or 1.0
-        s_range = max(ts.stock) - min(ts.stock) or 1.0
-        p_min_val = mc1.number_input("Min Price", value=float(min(ts.price)) - p_range * 0.1,
+        p_min, p_max = finite_minmax(ts.price)
+        s_min, s_max = finite_minmax(ts.stock)
+        p_range = p_max - p_min or 1.0
+        s_range = s_max - s_min or 1.0
+        p_min_val = mc1.number_input("Min Price", value=float(p_min) - p_range * 0.1,
                                     key=wk(f"mp_min_{basket_name}"))
-        p_max_val = mc1.number_input("Max Price", value=float(max(ts.price)) + p_range * 0.1,
+        p_max_val = mc1.number_input("Max Price", value=float(p_max) + p_range * 0.1,
                                     key=wk(f"mp_max_{basket_name}"))
-        s_min_val = mc2.number_input("Min Stock", value=float(min(ts.stock)) - s_range * 0.1,
+        s_min_val = mc2.number_input("Min Stock", value=float(s_min) - s_range * 0.1,
                                     key=wk(f"ms_min_{basket_name}"))
-        s_max_val = mc2.number_input("Max Stock", value=float(max(ts.stock)) + s_range * 0.1,
+        s_max_val = mc2.number_input("Max Stock", value=float(s_max) + s_range * 0.1,
                                     key=wk(f"ms_max_{basket_name}"))
         n_p = st.slider("Price grid points", 10, 100, 50, key=wk(f"np_{basket_name}"))
         n_s = st.slider("Stock grid points", 10, 100, 50, key=wk(f"ns_{basket_name}"))
@@ -738,27 +927,29 @@ def _render_sumup_margin_model(
 
         prices = [r["weighted_price"] for r in sumup_rows]
         stocks = [r["total_stock"] for r in sumup_rows]
-        p_range = max(prices) - min(prices) or 1.0
-        s_range = max(stocks) - min(stocks) or 1.0
+        p_min, p_max = finite_minmax(prices)
+        s_min, s_max = finite_minmax(stocks)
+        p_range = p_max - p_min or 1.0
+        s_range = s_max - s_min or 1.0
         mc1, mc2 = st.columns(2)
         p_min_val = mc1.number_input(
             "Min W. Price",
-            value=float(min(prices)) - p_range * 0.1,
+            value=float(p_min) - p_range * 0.1,
             key=wk("sumup_mp_min"),
         )
         p_max_val = mc1.number_input(
             "Max W. Price",
-            value=float(max(prices)) + p_range * 0.1,
+            value=float(p_max) + p_range * 0.1,
             key=wk("sumup_mp_max"),
         )
         s_min_val = mc2.number_input(
             "Min Total Stock",
-            value=float(min(stocks)) - s_range * 0.1,
+            value=float(s_min) - s_range * 0.1,
             key=wk("sumup_ms_min"),
         )
         s_max_val = mc2.number_input(
             "Max Total Stock",
-            value=float(max(stocks)) + s_range * 0.1,
+            value=float(s_max) + s_range * 0.1,
             key=wk("sumup_ms_max"),
         )
         n_p = st.slider("Price grid points", 10, 100, 50, key=wk("sumup_np"))
@@ -838,6 +1029,81 @@ def _parse_optional_float(raw: str) -> float | None:
         return float(s)
     except ValueError:
         return None
+
+
+FILTER_WIDGET_KEYS: dict[str, str] = {
+    "min_sold": "fi_min_sold",
+    "max_sold": "fi_max_sold",
+    "min_price": "fi_min_price",
+    "max_price": "fi_max_price",
+    "min_m": "fi_min_m",
+    "max_m": "fi_max_m",
+    "min_week": "fi_min_week",
+    "max_week": "fi_max_week",
+}
+
+
+def _default_filter_raw_values() -> dict[str, str]:
+    return {
+        "min_sold": "",
+        "max_sold": "",
+        "min_price": str(DEFAULT_MIN_PRICE),
+        "max_price": "",
+        "min_m": "",
+        "max_m": "",
+        "min_week": "",
+        "max_week": "",
+    }
+
+
+def _ensure_filter_values_by_level() -> dict[str, dict[str, str]]:
+    defaults = _default_filter_raw_values()
+    if "filter_values_by_level" not in st.session_state:
+        st.session_state.filter_values_by_level = {
+            FILTER_LEVEL_GENERAL: dict(defaults),
+            FILTER_LEVEL_TARGETED: dict(defaults),
+        }
+    store: dict[str, dict[str, str]] = st.session_state.filter_values_by_level
+    for level in FILTER_LEVEL_CHOICES:
+        if level not in store:
+            store[level] = dict(defaults)
+        for key, value in defaults.items():
+            store[level].setdefault(key, value)
+    return store
+
+
+def _read_filter_widgets() -> dict[str, str]:
+    defaults = _default_filter_raw_values()
+    return {
+        field: str(st.session_state.get(widget_key, defaults[field]))
+        for field, widget_key in FILTER_WIDGET_KEYS.items()
+    }
+
+
+def _save_filter_widgets_to_level(level: str) -> None:
+    store = _ensure_filter_values_by_level()
+    store[normalize_filter_level(level)] = _read_filter_widgets()
+
+
+def _load_filter_widgets_from_level(level: str) -> None:
+    store = _ensure_filter_values_by_level()
+    defaults = _default_filter_raw_values()
+    values = store[normalize_filter_level(level)]
+    for field, widget_key in FILTER_WIDGET_KEYS.items():
+        st.session_state[widget_key] = values.get(field, defaults[field])
+
+
+def _parse_level_filter_values(raw: dict[str, str]) -> dict[str, object]:
+    return {
+        "min_sold": _parse_float(str(raw.get("min_sold", "")), -math.inf),
+        "max_sold": _parse_float(str(raw.get("max_sold", "")), math.inf),
+        "min_price": _parse_float(str(raw.get("min_price", "")), DEFAULT_MIN_PRICE),
+        "max_price": _parse_float(str(raw.get("max_price", "")), math.inf),
+        "min_m": _parse_float(str(raw.get("min_m", "")), -math.inf),
+        "max_m": _parse_float(str(raw.get("max_m", "")), math.inf),
+        "min_week": str(raw.get("min_week", "")).strip() or None,
+        "max_week": str(raw.get("max_week", "")).strip() or None,
+    }
 
 
 def _apply_optional_discount_hist(
@@ -935,6 +1201,231 @@ def _resolve_fit_indices(
 
     selected_qw = fit_scope.replace("Quadweek: ", "", 1)
     return [i for i, qw in enumerate(ts.quadweeks) if str(qw) == selected_qw]
+
+
+def _combination_chart_key(
+    baskets: list[str],
+    group_label: str | None = None,
+) -> str:
+    if group_label:
+        return f"group::{group_label}"
+    digest = hashlib.md5(
+        "|".join(sorted(str(basket) for basket in baskets)).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"set::{digest}"
+
+
+def _render_basket_detail_plot_expanders(
+    ts: BasketTimeSeries,
+    basket_name: str,
+    show_qw: bool,
+    show_line: bool,
+    show_qw_avg: bool,
+    chart_state_key: str,
+    plot_margin: list[float] | None,
+    skipped_note: str,
+    bulk_cost_fit,
+    scope: dict,
+    sk,
+) -> None:
+    with st.expander("📊 Sold vs Price · Margin vs Price · Margin vs Sold"):
+        if skipped_note:
+            st.caption(skipped_note)
+        st.plotly_chart(
+            build_basket_scatter_3panel(
+                ts,
+                use_qw_colors=show_qw,
+                show_line=show_line,
+                show_qw_average=show_qw_avg,
+                margin_values=plot_margin,
+            ),
+            use_container_width=True,
+            key=sk(f"scatter_3panel_{basket_name}_{chart_state_key}"),
+        )
+
+    with st.expander("📉 Cost vs Price (Basket Detail)"):
+        fit_cost_res = scope["fit_cost"].get(basket_name)
+        scope_col, button_fit_cost_col, _ = st.columns([1, 1, 4])
+        fit_scope_cost = scope_col.selectbox(
+            "Points to fit",
+            _quadweek_fit_options(ts),
+            key=sk(f"scope_cost_{basket_name}"),
+            label_visibility="collapsed",
+        )
+        fit_cost_line_clicked = button_fit_cost_col.button(
+            "Fit Line",
+            key=sk(f"btn_cost_{basket_name}"),
+        )
+
+        plot_clmn, selection_clmn = st.columns([3, 1])
+
+        manual_indices_cost: list[int] | None = None
+        with selection_clmn:
+            st.markdown("**Data Points**")
+            manual_indices_cost = _manual_fit_indices(
+                ts,
+                key=sk(f"manual_cost_{basket_name}"),
+                value_label="Cost",
+                values=ts.cost,
+            )
+
+        fit_indices_cost = _resolve_fit_indices(ts, fit_scope_cost, manual_indices_cost)
+        highlight_cost = (
+            fit_indices_cost if fit_scope_cost == "Manual Selection" else None
+        )
+        plot_clmn.plotly_chart(
+            build_cost_vs_price(
+                ts,
+                use_qw_colors=show_qw,
+                show_line=show_line,
+                linefit=fit_cost_res,
+                fitted_indices=highlight_cost,
+                show_qw_average=show_qw_avg,
+            ),
+            use_container_width=True,
+            key=sk(f"cost_{basket_name}_{chart_state_key}"),
+        )
+
+        if fit_cost_line_clicked:
+            if len(fit_indices_cost) < 2:
+                st.warning("Select at least 2 data points to fit a line.")
+                lf = None
+            else:
+                lf = fit_line(
+                    [ts.price[i] for i in fit_indices_cost],
+                    [ts.cost[i] for i in fit_indices_cost],
+                )
+            if lf is None:
+                st.warning("Not enough data points to fit a line.")
+            else:
+                scope["fit_cost"][basket_name] = lf
+                st.rerun()
+        if fit_cost_res:
+            cost_res_col, _ = st.columns([3, 1])
+            with cost_res_col.container(border=True):
+                _render_linefit_stats(fit_cost_res)
+
+    with st.expander("🌐 3D Overview: Price × Sold × M (Basket Detail)"):
+        if skipped_note:
+            st.caption(skipped_note)
+        st.plotly_chart(
+            build_3d_price_sold_m(
+                ts,
+                use_qw_colors=show_qw,
+                show_line=show_line,
+                show_qw_average=show_qw_avg,
+                m_values=plot_margin,
+            ),
+            use_container_width=True,
+            key=sk(f"3d_psm_{basket_name}_{chart_state_key}"),
+        )
+
+    with st.expander("🌐 3D Overview: Price × Stock × Sold  (Basket Detail)"):
+        fit_sold_res = scope["fit_sold"].get(basket_name)
+        method_col, scope_col, button_fit_sold_plane_col, _ = st.columns([1, 1, 1, 3])
+        method_s = method_col.selectbox(
+            "Fit method",
+            ["mlr", "pca"],
+            format_func=str.upper,
+            key=sk(f"meth_s_{basket_name}"),
+            label_visibility="collapsed",
+        )
+        fit_scope_s = scope_col.selectbox(
+            "Points to fit",
+            _quadweek_fit_options(ts),
+            key=sk(f"scope_s_{basket_name}"),
+            label_visibility="collapsed",
+        )
+        fit_sold_plane_clicked = button_fit_sold_plane_col.button(
+            "Fit Plane",
+            key=sk(f"btn_plane_sold_{basket_name}"),
+        )
+
+        plot_clmn, selection_clmn = st.columns([3, 1])
+
+        manual_indices_s: list[int] | None = None
+        with selection_clmn:
+            st.markdown("**Data Points**")
+            manual_indices_s = _manual_fit_indices(
+                ts,
+                key=sk(f"manual_sold_{basket_name}"),
+                value_label="Sold",
+                values=ts.sold,
+            )
+
+        fit_indices_s = _resolve_fit_indices(ts, fit_scope_s, manual_indices_s)
+        highlight_s = fit_indices_s if fit_scope_s == "Manual Selection" else None
+        plot_clmn.plotly_chart(
+            build_3d_price_stock_sold(
+                ts,
+                use_qw_colors=show_qw,
+                show_line=show_line,
+                planefit=fit_sold_res,
+                fitted_indices=highlight_s,
+                show_qw_average=show_qw_avg,
+            ),
+            use_container_width=True,
+            key=sk(f"3d_pss_{basket_name}_{chart_state_key}"),
+        )
+        if fit_sold_plane_clicked:
+            if len(fit_indices_s) < 3:
+                st.warning("Select at least 3 data points to fit a plane.")
+                pf = None
+            else:
+                pf = fit_plane(
+                    [ts.price[i] for i in fit_indices_s],
+                    [ts.stock[i] for i in fit_indices_s],
+                    [ts.sold[i] for i in fit_indices_s],
+                    method=method_s,
+                )
+            if pf is None:
+                st.warning("Not enough data points to fit a plane.")
+            else:
+                scope["fit_sold"][basket_name] = pf
+                st.rerun()
+        if fit_sold_res:
+            sold_res_col, _ = st.columns([3, 1])
+            with sold_res_col.container(border=True):
+                _render_planefit_stats(fit_sold_res, label="Sold = z₀ + a·Price + b·Stock")
+
+    with st.expander("🌐 3D Overview: Price × Stock × M  +  Margin Optimisation (Basket Detail)"):
+        fit_m_res = scope["fit_sold_m"].get(basket_name)
+        saved_margin_model = scope["margin_model"].get(basket_name)
+        margin_surface = saved_margin_model["surface"] if saved_margin_model else None
+        if skipped_note:
+            st.caption(skipped_note)
+        st.plotly_chart(
+            build_3d_price_stock_m(
+                ts,
+                use_qw_colors=show_qw,
+                show_line=show_line,
+                planefit=fit_m_res,
+                margin_surface=margin_surface,
+                show_qw_average=show_qw_avg,
+                m_values=plot_margin,
+            ),
+            use_container_width=True,
+            key=sk(f"3d_pstm_{basket_name}_{chart_state_key}"),
+        )
+        with st.expander("**📐 Analytical Margin Optimisation Model**"):
+            fit_sold_ok = scope["fit_sold"].get(basket_name)
+            fit_cost_ok = bulk_cost_fit or scope["fit_cost"].get(basket_name)
+            if fit_sold_ok and fit_cost_ok:
+                _render_margin_model(
+                    basket_name,
+                    ts,
+                    fit_sold_ok,
+                    fit_cost_ok,
+                    scope,
+                    sk,
+                    m_values=plot_margin,
+                )
+            else:
+                st.info(
+                    "To run the model, first fit both:\n"
+                    "- **Cost vs Price** (Cost = z₀ + a·Price)\n"
+                    "- **Price × Stock × Sold** plane (Sold = z₀ + a·Price + b·Stock)"
+                )
 
 
 def _sumup_fit_options(sumup_rows: list[dict]) -> list[str]:
@@ -1146,7 +1637,42 @@ file_discount_hist = st.file_uploader(
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.subheader("② Preprocessing Filters & Settings")
-st.caption("Exclude weekly data points outside these ranges. Leave blank for no limit.")
+_ensure_filter_values_by_level()
+lvl_col, _ = st.columns([1, 4])
+with lvl_col:
+    filter_level = st.selectbox(
+        "Level",
+        FILTER_LEVEL_CHOICES,
+        index=0,
+        key="fi_filter_level",
+        help=(
+            "Each Level keeps its own min/max values. Switching the dropdown "
+            "shows that Level's ranges. Build applies both: General drops "
+            "out-of-range weeks; Targeted hides only the out-of-range metric."
+        ),
+    )
+filter_level = normalize_filter_level(filter_level)
+previous_level = st.session_state.get("fi_filter_level_active")
+if previous_level is None:
+    st.session_state.fi_filter_level_active = filter_level
+elif previous_level != filter_level:
+    _save_filter_widgets_to_level(previous_level)
+    _load_filter_widgets_from_level(filter_level)
+    st.session_state.fi_filter_level_active = filter_level
+    st.rerun()
+
+if filter_level == FILTER_LEVEL_TARGETED:
+    st.caption(
+        "Editing Targeted ranges. General ranges stay saved. Build applies both: "
+        "the week stays on time-series charts (gap / no dot for a Targeted metric); "
+        "scatter and 3D plots omit that metric. Week range still drops weeks fully."
+    )
+else:
+    st.caption(
+        "Editing General ranges. Targeted ranges stay saved. Build applies both: "
+        "General removes an entire week if any of these metrics is out of range. "
+        "Leave blank for no limit."
+    )
 
 f1, f2, f3, f4, f5 = st.columns(5)
 
@@ -1188,6 +1714,8 @@ with f5:
         "K", min_value=1, max_value=KMEANS_MAX_K, value=KMEANS_DEFAULT_K,
         label_visibility="collapsed", key="fi_k",
     )
+
+_save_filter_widgets_to_level(filter_level)
 
 product_bs_category = "Aggregated"
 if input_mode in PRODUCT_BS_INPUT_MODES:
@@ -1233,19 +1761,21 @@ if build_clicked:
         with st.spinner("Parsing and computing correlations…"):
             try:
                 log_lines = [f"Input format: {input_mode}"]
+                _save_filter_widgets_to_level(filter_level)
+                filter_store = _ensure_filter_values_by_level()
+                general_filters = _parse_level_filter_values(
+                    filter_store[FILTER_LEVEL_GENERAL]
+                )
+                targeted_filters = _parse_level_filter_values(
+                    filter_store[FILTER_LEVEL_TARGETED]
+                )
                 if input_mode == TRACKING_REPORT_MODE:
                     df_report = pd.read_csv(io.BytesIO(file_tracking.read()))
                     log_lines.append(f"TrackingBaskets rows uploaded: {len(df_report)}")
                     analysis = run_tracking_report_analysis(
                         df_report,
-                        min_sold  = _parse_float(min_sold_raw,  -math.inf),
-                        max_sold  = _parse_float(max_sold_raw,   math.inf),
-                        min_price = _parse_float(min_price_raw, DEFAULT_MIN_PRICE),
-                        max_price = _parse_float(max_price_raw,  math.inf),
-                        min_m     = _parse_float(min_m_raw,     -math.inf),
-                        max_m     = _parse_float(max_m_raw,      math.inf),
-                        min_week  = min_week.strip() or None,
-                        max_week  = max_week.strip() or None,
+                        general_filters=general_filters,
+                        targeted_filters=targeted_filters,
                     )
                     pbs_scope["discount_hist_df"] = _apply_optional_discount_hist(
                         analysis.basket_data,
@@ -1265,14 +1795,8 @@ if build_clicked:
                         df_report,
                         product_bs_category=product_bs_category,
                         use_monthly_average_metrics=input_mode == PRODUCT_BS_MONTHLY_AV_MODE,
-                        min_sold  = _parse_float(min_sold_raw,  -math.inf),
-                        max_sold  = _parse_float(max_sold_raw,   math.inf),
-                        min_price = _parse_float(min_price_raw, DEFAULT_MIN_PRICE),
-                        max_price = _parse_float(max_price_raw,  math.inf),
-                        min_m     = _parse_float(min_m_raw,     -math.inf),
-                        max_m     = _parse_float(max_m_raw,      math.inf),
-                        min_week  = min_week.strip() or None,
-                        max_week  = max_week.strip() or None,
+                        general_filters=general_filters,
+                        targeted_filters=targeted_filters,
                     )
                     log_lines.extend(parser_warnings)
                     pbs_scope["discount_hist_df"] = _apply_optional_discount_hist(
@@ -1283,6 +1807,7 @@ if build_clicked:
                     )
                 pbs_scope["analysis"] = analysis
                 clear_product_bs_scope_derived(pbs_scope)
+                log_lines.append("Filter levels: General and Targeted (both applied)")
                 log_lines.extend(_analysis_log_lines(analysis))
                 _set_log(log_lines)
                 pbs_scope["build_message"] = (
@@ -1561,6 +2086,49 @@ exp_col.download_button(
     file_name="pcba_results.csv", mime="text/csv",
 )
 
+basket_weight_metric = "stock"
+use_basket_multiselect = False
+preview_group = None
+group_labels: list[str] = []
+if "Group" in df_table.columns:
+    for label in df_table["Group"].astype(str).tolist():
+        if label not in group_labels:
+            group_labels.append(label)
+
+with st.expander("Combination", expanded=False):
+    group_col, ms_col, weight_col = st.columns([2, 1, 2])
+    preview_group_choice = group_col.selectbox(
+        "Group",
+        ["None"] + group_labels,
+        index=0,
+        key=sk("basket_preview_group"),
+        help=(
+            "Preview one cluster or octant group from the Group column "
+            "as combined Basket Detail."
+        ),
+    )
+    if preview_group_choice != "None":
+        preview_group = preview_group_choice
+    use_basket_multiselect = ms_col.toggle(
+        "Multiselect",
+        value=False,
+        key=sk("basket_multiselect"),
+        help="Select several baskets in the table to sum Week Progress like Sum-Up.",
+    )
+    show_weights = bool(preview_group) or use_basket_multiselect
+    if show_weights:
+        basket_weight_label = weight_col.selectbox(
+            "Weights",
+            list(DISCOUNT_PROM_WEIGHT_CHOICES),
+            index=0,
+            key=sk("basket_detail_weight"),
+            help=(
+                "Weight Discount and Prom by Stock, CountProduct, or Sold "
+                "when summing selected baskets."
+            ),
+        )
+        basket_weight_metric = discount_prom_weight_key(basket_weight_label)
+
 
 
 # 1. Define the coloring rule
@@ -1765,27 +2333,158 @@ tbl_event = st.dataframe(
     use_container_width=True,
     height=420,
     on_select="rerun",
-    selection_mode="single-row",
+    selection_mode="multi-row" if use_basket_multiselect else "single-row",
     key=sk(
         f"basket_table_{int(show_price_sold_fit)}_"
-        f"{int(show_price_stock_sold_fit)}_{int(show_cost_price_fit)}"
+        f"{int(show_price_stock_sold_fit)}_{int(show_cost_price_fit)}_"
+        f"{int(use_basket_multiselect)}"
     ),
     column_config=basket_table_column_config,
 )
 
 sel_rows = tbl_event.selection.rows if tbl_event and tbl_event.selection else []
-if sel_rows:
-    chosen_basket = df_table.iloc[sel_rows[0]]["Basket"]
-    if chosen_basket != scope["selected_basket"]:
-        scope["selected_basket"] = chosen_basket
+if preview_group:
+    group_baskets = [
+        str(basket)
+        for basket in df_table.loc[
+            df_table["Group"].astype(str) == str(preview_group),
+            "Basket",
+        ].tolist()
+        if str(basket) in result.basket_data
+    ]
+    scope["selected_baskets"] = group_baskets
+    scope["selected_basket"] = group_baskets[0] if group_baskets else None
+elif sel_rows:
+    chosen_baskets = [
+        str(df_table.iloc[idx]["Basket"])
+        for idx in sel_rows
+        if str(df_table.iloc[idx]["Basket"]) in result.basket_data
+    ]
+    scope["selected_baskets"] = chosen_baskets
+    scope["selected_basket"] = chosen_baskets[-1] if chosen_baskets else None
+elif use_basket_multiselect:
+    if not scope.get("selected_baskets") and scope.get("selected_basket"):
+        scope["selected_baskets"] = [str(scope["selected_basket"])]
+else:
+    scope["selected_baskets"] = (
+        [str(scope["selected_basket"])] if scope.get("selected_basket") else []
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ⑥ Basket Drill-Down
 # ─────────────────────────────────────────────────────────────────────────────
 
-if scope["selected_basket"] and scope["selected_basket"] in result.basket_data:
-    ts          = result.basket_data[scope["selected_basket"]]
-    basket_name = scope["selected_basket"]
+detail_baskets = _detail_baskets_from_scope(scope, result.basket_data)
+
+if len(detail_baskets) > 1:
+    if preview_group:
+        detail_label = preview_group
+    elif len(detail_baskets) <= 6:
+        detail_label = ", ".join(detail_baskets)
+    else:
+        detail_label = f"{len(detail_baskets)} baskets"
+    st.divider()
+    st.subheader(f"⑥ Basket Detail: **{detail_label}**")
+    if preview_group or len(detail_baskets) > 6:
+        st.caption(
+            f"{len(detail_baskets)} baskets"
+            + (": " + ", ".join(detail_baskets) if len(detail_baskets) <= 12 else "")
+        )
+
+    ctrl1, ctrl2, ctrl3, _ = st.columns([1, 1, 1, 3])
+    show_line = ctrl1.toggle(
+        "Line + Symbol",
+        value=scope["show_line"],
+        key=sk("tog_line_multi"),
+    )
+    show_qw = ctrl2.toggle(
+        "Colour by Quadweek",
+        value=scope["show_qw_colors"],
+        key=sk("tog_qw_multi"),
+    )
+    show_qw_avg = ctrl3.toggle(
+        "QW Average",
+        value=scope["show_qw_average"],
+        key=sk("tog_qw_avg_multi"),
+    )
+    scope["show_line"] = show_line
+    scope["show_qw_colors"] = show_qw
+    scope["show_qw_average"] = show_qw_avg
+
+    selected_agg = aggregate_selected_basket_weeks(
+        result.basket_data,
+        detail_baskets,
+        result.all_weeks,
+    )
+    progress_specs = _selected_baskets_week_progress_specs(
+        selected_agg,
+        weight_metric=basket_weight_metric,
+    )
+    week_labels = list(selected_agg["weeks"])
+    quadweeks = list(selected_agg["quadweeks"])
+    chart_state_key = (
+        f"{show_qw}_{show_line}_{show_qw_avg}_{basket_weight_metric}_"
+        f"{len(detail_baskets)}"
+    )
+
+    with st.expander("📈 Week Progress", expanded=True):
+        enabled_progress = _render_progress_toggles(
+            progress_specs,
+            lambda key: sk(f"wp_{key}_multi"),
+        )
+        if enabled_progress:
+            prog_cols = st.columns(2)
+            for idx, spec in enumerate(enabled_progress):
+                with prog_cols[idx % 2]:
+                    st.plotly_chart(
+                        build_metric_progress(
+                            week_labels,
+                            spec["values"],
+                            title=spec["title"],
+                            y_title=spec["y_title"],
+                            marker_color=spec["marker_color"],
+                            line_color=spec["line_color"],
+                            show_line=show_line,
+                            quadweeks=quadweeks,
+                            use_qw_colors=show_qw,
+                            show_qw_average=show_qw_avg,
+                        ),
+                        use_container_width=True,
+                        key=sk(
+                            f"wp_chart_{spec['key']}_multi_{chart_state_key}"
+                        ),
+                    )
+        else:
+            st.caption("Enable at least one metric above to show week progress charts.")
+
+    combo_key = _combination_chart_key(detail_baskets, preview_group)
+    combo_ts = combined_basket_time_series(selected_agg, basket=str(detail_label))
+    if combo_ts.n_weeks < 1:
+        st.caption(
+            "Not enough weekly points with finite Price, Sold, Stock, Margin, and Cost to plot."
+        )
+    else:
+        st.caption(
+            "Scatter, Cost vs Price, and 3D charts use weekly sums and W.Price "
+            "for the selected baskets, same as Week Progress."
+        )
+        _render_basket_detail_plot_expanders(
+            ts=combo_ts,
+            basket_name=combo_key,
+            show_qw=show_qw,
+            show_line=show_line,
+            show_qw_avg=show_qw_avg,
+            chart_state_key=f"{chart_state_key}_{combo_key}",
+            plot_margin=None,
+            skipped_note="",
+            bulk_cost_fit=None,
+            scope=scope,
+            sk=sk,
+        )
+
+elif len(detail_baskets) == 1 and detail_baskets[0] in result.basket_data:
+    ts          = result.basket_data[detail_baskets[0]]
+    basket_name = detail_baskets[0]
 
     st.divider()
     st.subheader(f"⑥ Basket Detail: **{basket_name}**")
@@ -1895,225 +2594,19 @@ if scope["selected_basket"] and scope["selected_basket"] in result.basket_data:
         else:
             st.caption("Enable at least one metric above to show week progress charts.")
 
-    with st.expander("📊 Sold vs Price · Margin vs Price · Margin vs Sold"):
-        if skipped_note:
-            st.caption(skipped_note)
-        st.plotly_chart(
-            build_basket_scatter_3panel(
-                ts,
-                use_qw_colors=show_qw,
-                show_line=show_line,
-                show_qw_average=show_qw_avg,
-                margin_values=plot_margin,
-            ),
-            use_container_width=True,
-            key=sk(f"scatter_3panel_{basket_name}_{chart_state_key}"),
-        )
-
-    # ── Cost vs Price ──────────────────────────────────────────────────────
-
-    with st.expander("📉 Cost vs Price (Basket Detail)"):
-        fit_cost_res = scope["fit_cost"].get(basket_name)
-        scope_col, button_fit_cost_col, _ = st.columns([1, 1, 4])
-        fit_scope_cost = scope_col.selectbox(
-            "Points to fit",
-            _quadweek_fit_options(ts),
-            key=sk(f"scope_cost_{basket_name}"),
-            label_visibility="collapsed",
-        )
-        fit_cost_line_clicked = button_fit_cost_col.button("Fit Line", key=sk(f"btn_cost_{basket_name}"))
-
-        plot_clmn, selection_clmn = st.columns([3, 1])
-
-        manual_indices_cost: list[int] | None = None
-        #if fit_scope_cost == "Manual Selection":
-        with selection_clmn:
-            st.markdown("**Data Points**")
-            manual_indices_cost = _manual_fit_indices(
-                ts,
-                key=sk(f"manual_cost_{basket_name}"),
-                value_label="Cost",
-                values=ts.cost,
-            )
-
-        fit_indices_cost = _resolve_fit_indices(ts, fit_scope_cost, manual_indices_cost)
-        highlight_cost = (
-            fit_indices_cost if fit_scope_cost == "Manual Selection" else None
-        )
-        plot_clmn.plotly_chart(
-                                build_cost_vs_price(
-                                    ts,
-                                    use_qw_colors=show_qw,
-                                    show_line=show_line,
-                                    linefit=fit_cost_res,
-                                    fitted_indices=highlight_cost,
-                                    show_qw_average=show_qw_avg,
-                                ),
-                                use_container_width=True,
-                                key=sk(f"cost_{basket_name}_{chart_state_key}"),
-        )
-
-        if fit_cost_line_clicked:
-            if len(fit_indices_cost) < 2:
-                st.warning("Select at least 2 data points to fit a line.")
-                lf = None
-            else:
-                lf = fit_line(
-                    [ts.price[i] for i in fit_indices_cost],
-                    [ts.cost[i] for i in fit_indices_cost],
-                )
-            if lf is None:
-                st.warning("Not enough data points to fit a line.")
-            else:
-                scope["fit_cost"][basket_name] = lf
-                st.rerun()
-        if fit_cost_res:
-            cost_res_col, _ = st.columns([3,1])
-            with cost_res_col.container(border=True):
-                _render_linefit_stats(fit_cost_res)
-
-    # ── 3D Price × Sold × M ───────────────────────────────────────────────
-
-    with st.expander("🌐 3D Overview: Price × Sold × M (Basket Detail)"):
-        if skipped_note:
-            st.caption(skipped_note)
-        st.plotly_chart(
-            build_3d_price_sold_m(
-                ts,
-                use_qw_colors=show_qw,
-                show_line=show_line,
-                show_qw_average=show_qw_avg,
-                m_values=plot_margin,
-            ),
-            use_container_width=True,
-            key=sk(f"3d_psm_{basket_name}_{chart_state_key}"),
-        )
-
-    # ── 3D Price × Stock × Sold ────────────────────────────────────────────
-
-    with st.expander("🌐 3D Overview: Price × Stock × Sold  (Basket Detail)"):
-        fit_sold_res = scope["fit_sold"].get(basket_name)
-        method_col, scope_col, button_fit_sold_plane_col, _ = st.columns([1, 1, 1, 3])
-        method_s = method_col.selectbox(
-            "Fit method",
-            ["mlr", "pca"],
-            format_func=str.upper,
-            key=sk(f"meth_s_{basket_name}"),
-            label_visibility="collapsed",
-        )
-        fit_scope_s = scope_col.selectbox(
-            "Points to fit",
-            _quadweek_fit_options(ts),
-            key=sk(f"scope_s_{basket_name}"),
-            label_visibility="collapsed",
-        )
-        fit_sold_plane_clicked = button_fit_sold_plane_col.button("Fit Plane", key=sk(f"btn_plane_sold_{basket_name}"))
-
-        plot_clmn, selection_clmn = st.columns([3, 1])
-
-        manual_indices_s: list[int] | None = None
-        #if fit_scope_s == "Manual Selection":
-        with selection_clmn:
-            st.markdown("**Data Points**")
-            manual_indices_s = _manual_fit_indices(
-                ts,
-                key=sk(f"manual_sold_{basket_name}"),
-                value_label="Sold",
-                values=ts.sold,
-            )
-
-        fit_indices_s = _resolve_fit_indices(ts, fit_scope_s, manual_indices_s)
-        highlight_s = fit_indices_s if fit_scope_s == "Manual Selection" else None
-        plot_clmn.plotly_chart(
-                                    build_3d_price_stock_sold(
-                                        ts,
-                                        use_qw_colors=show_qw,
-                                        show_line=show_line,
-                                        planefit=fit_sold_res,
-                                        fitted_indices=highlight_s,
-                                        show_qw_average=show_qw_avg,
-                                    ),
-                                    use_container_width=True,
-                                    key=sk(f"3d_pss_{basket_name}_{chart_state_key}"),
-                                )
-        if fit_sold_plane_clicked:
-            if len(fit_indices_s) < 3:
-                st.warning("Select at least 3 data points to fit a plane.")
-                pf = None
-            else:
-                pf = fit_plane(
-                    [ts.price[i] for i in fit_indices_s],
-                    [ts.stock[i] for i in fit_indices_s],
-                    [ts.sold[i] for i in fit_indices_s],
-                    method=method_s,
-                )
-            if pf is None:
-                st.warning("Not enough data points to fit a plane.")
-            else:
-                scope["fit_sold"][basket_name] = pf
-                st.rerun()
-        if fit_sold_res:
-            sold_res_col, _ = st.columns([3,1])
-            with sold_res_col.container(border=True):
-                _render_planefit_stats(fit_sold_res, label="Sold = z₀ + a·Price + b·Stock")
-
-    # ── 3D Price × Stock × M  +  Margin Optimisation ─────────────────────
-
-    with st.expander("🌐 3D Overview: Price × Stock × M  +  Margin Optimisation (Basket Detail)"):
-        fit_m_res = scope["fit_sold_m"].get(basket_name)
-        saved_margin_model = scope["margin_model"].get(basket_name)
-        margin_surface = saved_margin_model["surface"] if saved_margin_model else None
-        method_col, scope_col, button_fit_sold_plane_col, _ = st.columns([1, 1, 1, 3])
-        if skipped_note:
-            st.caption(skipped_note)
-        st.plotly_chart(
-            build_3d_price_stock_m(
-                ts,
-                use_qw_colors=show_qw,
-                show_line=show_line,
-                planefit=fit_m_res,
-                margin_surface=margin_surface,
-                show_qw_average=show_qw_avg,
-                m_values=plot_margin,
-            ),
-            use_container_width=True,
-            key=sk(f"3d_pstm_{basket_name}_{chart_state_key}"),
-        )
-        # method_m = st.selectbox("Fit method", ["mlr", "pca"],
-        #                          format_func=str.upper,
-        #                          key=sk(f"meth_m_{basket_name}"))
-        # if st.button("Fit Plane  (M = z₀ + a·Price + b·Stock)",
-        #              key=sk(f"btn_fitm_{basket_name}")):
-        #     pf_m = fit_plane(ts.price, ts.stock, ts.m, method=method_m)
-        #     if pf_m is None:
-        #         st.warning("Not enough data points to fit a plane.")
-        #     else:
-        #         scope["fit_sold_m"][basket_name] = pf_m
-        #         st.rerun()
-        # if fit_m_res:
-        #     _render_planefit_stats(fit_m_res, label="M = z₀ + a·Price + b·Stock")
-
-        #st.divider()
-       # st.markdown("**📐 Analytical Margin Optimisation Model**")
-        with st.expander("**📐 Analytical Margin Optimisation Model**"):
-            fit_sold_ok = scope["fit_sold"].get(basket_name)
-            fit_cost_ok = bulk_cost_fit or scope["fit_cost"].get(basket_name)
-            if fit_sold_ok and fit_cost_ok:
-                _render_margin_model(
-                    basket_name,
-                    ts,
-                    fit_sold_ok,
-                    fit_cost_ok,
-                    scope,
-                    sk,
-                    m_values=plot_margin,
-                )
-            else:
-                st.info(
-                    "To run the model, first fit both:\n"
-                    "- **Cost vs Price** (Cost = z₀ + a·Price)\n"
-                    "- **Price × Stock × Sold** plane (Sold = z₀ + a·Price + b·Stock)"
-                )
+    _render_basket_detail_plot_expanders(
+        ts=ts,
+        basket_name=basket_name,
+        show_qw=show_qw,
+        show_line=show_line,
+        show_qw_avg=show_qw_avg,
+        chart_state_key=chart_state_key,
+        plot_margin=plot_margin,
+        skipped_note=skipped_note,
+        bulk_cost_fit=bulk_cost_fit,
+        scope=scope,
+        sk=sk,
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ⑦ Sum-Up

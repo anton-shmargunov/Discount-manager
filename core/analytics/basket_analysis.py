@@ -27,6 +27,7 @@ from core.clustering.kmeans import run_kmeans, compute_cluster_summary
 from core.clustering.octants import assign_octants, compute_octant_summary
 from core.statistics.correlations import compute_pearson
 from core.statistics.metrics import monthly_reserve
+from core.transforms.metric_filters import combine_week_limits, is_finite_number
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +50,9 @@ def run_basket_analysis(
     max_m: float = math.inf,
     min_week: Optional[str] = None,
     max_week: Optional[str] = None,
+    filter_level: str = "General",
+    general_filters: Optional[dict] = None,
+    targeted_filters: Optional[dict] = None,
 ) -> "AnalysisResult":
     """
     Execute the full basket correlation and bucketing analysis.
@@ -61,6 +65,9 @@ def run_basket_analysis(
         Data-point level filters applied before statistics.
     min_week / max_week:
         Optional ISO week range filter ("YYYY-WW" format).
+    filter_level:
+        "General" drops the whole week if any metric is out of range.
+        "Targeted" keeps the week and masks only the out-of-range metric.
 
     Returns
     -------
@@ -82,10 +89,21 @@ def run_basket_analysis(
     purchase_dict = index_by_week(df_purchase) if df_purchase is not None else None
     recap_dict = index_by_week(df_recap) if df_recap is not None else None
 
+    week_min, week_max = combine_week_limits(
+        (min_week, max_week),
+        (
+            (general_filters or {}).get("min_week"),
+            (general_filters or {}).get("max_week"),
+        ),
+        (
+            (targeted_filters or {}).get("min_week"),
+            (targeted_filters or {}).get("max_week"),
+        ),
+    )
     weeks = resolve_common_weeks(
         [sold_dict, price_dict, m_dict, stock_dict],
-        min_week=min_week,
-        max_week=max_week,
+        min_week=week_min,
+        max_week=week_max,
     )
     if not weeks:
         raise ValueError("No overlapping 'year_week' values found across the four files.")
@@ -107,6 +125,9 @@ def run_basket_analysis(
         count_product_dict=count_product_dict,
         purchase_dict=purchase_dict,
         recap_dict=recap_dict,
+        filter_level=filter_level,
+        general_filters=general_filters,
+        targeted_filters=targeted_filters,
     )
 
     if not basket_results:
@@ -136,6 +157,9 @@ def run_tracking_report_analysis(
     max_m: float = math.inf,
     min_week: Optional[str] = None,
     max_week: Optional[str] = None,
+    filter_level: str = "General",
+    general_filters: Optional[dict] = None,
+    targeted_filters: Optional[dict] = None,
 ) -> "AnalysisResult":
     """
     Execute the full analysis from a single long TrackingBaskets_v2 report.
@@ -157,6 +181,9 @@ def run_tracking_report_analysis(
         max_m=max_m,
         min_week=min_week,
         max_week=max_week,
+        filter_level=filter_level,
+        general_filters=general_filters,
+        targeted_filters=targeted_filters,
     )
 
 
@@ -172,6 +199,9 @@ def run_tracking_product_bs_report_analysis(
     max_m: float = math.inf,
     min_week: Optional[str] = None,
     max_week: Optional[str] = None,
+    filter_level: str = "General",
+    general_filters: Optional[dict] = None,
+    targeted_filters: Optional[dict] = None,
 ) -> tuple["AnalysisResult", list[str]]:
     """
     Execute analysis from a TrackingBaskets_v2 - product_BS report.
@@ -210,6 +240,9 @@ def run_tracking_product_bs_report_analysis(
         max_m=max_m,
         min_week=min_week,
         max_week=max_week,
+        filter_level=filter_level,
+        general_filters=general_filters,
+        targeted_filters=targeted_filters,
     )
     return analysis, parsed.warnings
 
@@ -267,6 +300,24 @@ def compute_sumup_series(
         price_vals = [p.price for p in wt.points]
         m_vals = [p.m for p in wt.points]
 
+        cost_sold = 0.0
+        cost_margin = 0.0
+        cost_revenue = 0.0
+        for point in wt.points:
+            if (
+                is_finite_number(point.sold)
+                and is_finite_number(point.price)
+                and is_finite_number(point.m)
+                and float(point.sold) > 0
+            ):
+                cost_sold += float(point.sold)
+                cost_margin += float(point.m)
+                cost_revenue += float(point.sold) * float(point.price)
+        if cost_sold > 0:
+            total_cost = (cost_revenue / cost_sold) - (cost_margin / cost_sold)
+        else:
+            total_cost = float("nan")
+
         rows.append({
             "week": w,
             "quadweek": wt.quadweek,
@@ -279,7 +330,7 @@ def compute_sumup_series(
             "total_revenue": wt.sum_sold_price,
             "total_m": wt.sum_m,
             "total_recap": wt.sum_recap,
-            "total_cost": wt.weighted_price - (wt.sum_m / wt.sum_sold) if wt.sum_sold > 0 else 0.0,
+            "total_cost": total_cost,
             "total_monthly_reserve": monthly_reserve(wt.sum_stock, wt.sum_sold),
             "corr_SP": compute_pearson(sold_vals, price_vals),
             "corr_MP": compute_pearson(m_vals, price_vals),

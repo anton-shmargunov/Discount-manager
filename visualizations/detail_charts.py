@@ -117,6 +117,36 @@ def qw_index_spans(quadweeks: list[str]) -> list[tuple[str, int, int]]:
     return spans
 
 
+def _finite_values_at(values: list[float], indices: list[int]) -> list[float]:
+    finite: list[float] = []
+    for idx in indices:
+        if idx < 0 or idx >= len(values):
+            continue
+        try:
+            number = float(values[idx])
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            finite.append(number)
+    return finite
+
+
+def _finite_minmax(values: list[float]) -> tuple[float, float]:
+    finite = [float(v) for v in values if isinstance(v, (int, float)) and math.isfinite(float(v))]
+    if not finite:
+        finite = []
+        for value in values:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(number):
+                finite.append(number)
+    if not finite:
+        return 0.0, 1.0
+    return min(finite), max(finite)
+
+
 def qw_value_averages(values: list[float], quadweeks: list[str]) -> dict[str, float]:
     """Mean metric value for each quadweek (non-finite points skipped)."""
     buckets: dict[str, list[float]] = defaultdict(list)
@@ -196,8 +226,12 @@ def add_qw_average_markers_2d(
         trace_kwargs = {"row": row, "col": col}
 
     for qw, indices in sorted(qw_index_groups(quadweeks).items()):
-        avg_x = float(np.mean([xs[i] for i in indices]))
-        avg_y = float(np.mean([ys[i] for i in indices]))
+        xs_finite = _finite_values_at(xs, indices)
+        ys_finite = _finite_values_at(ys, indices)
+        if not xs_finite or not ys_finite:
+            continue
+        avg_x = float(np.mean(xs_finite))
+        avg_y = float(np.mean(ys_finite))
         color = cmap.get(qw, UNCLUSTERED_COLOR)
         fig.add_trace(
             go.Scatter(
@@ -237,9 +271,14 @@ def add_qw_average_markers_3d(
 
     cmap = qw_color_map(quadweeks)
     for qw, indices in sorted(qw_index_groups(quadweeks).items()):
-        avg_x = float(np.mean([xs[i] for i in indices]))
-        avg_y = float(np.mean([ys[i] for i in indices]))
-        avg_z = float(np.mean([zs[i] for i in indices]))
+        xs_finite = _finite_values_at(xs, indices)
+        ys_finite = _finite_values_at(ys, indices)
+        zs_finite = _finite_values_at(zs, indices)
+        if not xs_finite or not ys_finite or not zs_finite:
+            continue
+        avg_x = float(np.mean(xs_finite))
+        avg_y = float(np.mean(ys_finite))
+        avg_z = float(np.mean(zs_finite))
         color = cmap.get(qw, UNCLUSTERED_COLOR)
         fig.add_trace(
             go.Scatter3d(
@@ -434,7 +473,7 @@ def build_cost_vs_price(
         )
 
     if linefit is not None:
-        x_min, x_max = min(ts.price), max(ts.price)
+        x_min, x_max = _finite_minmax(ts.price)
         pad = (x_max - x_min) * 0.1 or 1.0
         x0, x1 = x_min - pad, x_max + pad
         fig.add_trace(go.Scatter(
@@ -631,10 +670,12 @@ def _add_plane_surface(
     surface_color: str,
 ) -> None:
     """Add a flat surface patch representing a fitted plane to an existing figure."""
-    x_pad = (max(x) - min(x)) * 0.1 or 1.0
-    y_pad = (max(y) - min(y)) * 0.1 or 1.0
-    x0, x1 = min(x) - x_pad, max(x) + x_pad
-    y0, y1 = min(y) - y_pad, max(y) + y_pad
+    x_vals = _finite_minmax(x)
+    y_vals = _finite_minmax(y)
+    x_pad = (x_vals[1] - x_vals[0]) * 0.1 or 1.0
+    y_pad = (y_vals[1] - y_vals[0]) * 0.1 or 1.0
+    x0, x1 = x_vals[0] - x_pad, x_vals[1] + x_pad
+    y0, y1 = y_vals[0] - y_pad, y_vals[1] + y_pad
 
     z_grid = [
         [fit.z0 + fit.a * x0 + fit.b * y0, fit.z0 + fit.a * x1 + fit.b * y0],

@@ -12,6 +12,7 @@ from typing import Optional, Sequence
 
 from core.models import Planefit, Linefit
 from configs.settings import MIN_POINTS_FOR_MLR, MIN_POINTS_FOR_SLR
+from core.transforms.metric_filters import finite_aligned
 
 
 # ---------------------------------------------------------------------------
@@ -269,10 +270,16 @@ def fit_plane(
 
     method: "mlr" or "pca"
     """
-    raw = fit_mlr(x, y, z) if method == "mlr" else fit_pca_plane(x, y, z)
+    rows = finite_aligned(x, y, z)
+    if not rows:
+        return None
+    xs = [row[0] for row in rows]
+    ys = [row[1] for row in rows]
+    zs = [row[2] for row in rows]
+    raw = fit_mlr(xs, ys, zs) if method == "mlr" else fit_pca_plane(xs, ys, zs)
     if raw is None:
         return None
-    return compute_fit_stats_3d(x, y, z, raw)
+    return compute_fit_stats_3d(xs, ys, zs, raw)
 
 
 def values_skipping_last(
@@ -303,6 +310,8 @@ def paired_values_skipping_zero_x(
     kept_x: list[float] = []
     kept_y: list[float] = []
     for xv, yv in zip(xs, ys):
+        if not math.isfinite(float(xv)) or not math.isfinite(float(yv)):
+            continue
         if xv == 0:
             continue
         kept_x.append(xv)
@@ -315,7 +324,12 @@ def fit_line(
     y: Sequence[float],
 ) -> Optional[Linefit]:
     """Fit a 2D line and return a Linefit with goodness-of-fit stats."""
-    raw = fit_slr(x, y)
+    rows = finite_aligned(x, y)
+    if not rows:
+        return None
+    xs = [row[0] for row in rows]
+    ys = [row[1] for row in rows]
+    raw = fit_slr(xs, ys)
     if raw is None:
         return None
-    return compute_fit_stats_2d(x, y, raw)
+    return compute_fit_stats_2d(xs, ys, raw)

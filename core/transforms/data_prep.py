@@ -25,6 +25,11 @@ from core.models import (
     WeeklyTotal,
 )
 from core.statistics.correlations import compute_basket_correlations, safe_correlation_coord
+from core.transforms.metric_filters import (
+    apply_metric_range,
+    is_finite_number,
+    resolve_level_bound_sets,
+)
 from configs.settings import CSV_METADATA_COLS
 
 
@@ -661,8 +666,8 @@ def compute_stock_trend_metrics(
 
     slopes_within: list[float] = []
     for indices in qw_groups.values():
-        if len(indices) == 4:
-            y_vals = [stock[idx] for idx in indices]
+        y_vals = [stock[idx] for idx in indices if is_finite_number(stock[idx])]
+        if len(indices) == 4 and len(y_vals) == 4:
             slope = _slr_slope([0.0, 1.0, 2.0, 3.0], y_vals)
             if slope is not None:
                 slopes_within.append(slope)
@@ -678,6 +683,8 @@ def compute_stock_trend_metrics(
             prev_qw and curr_qw
             and prev_qw != "N/A" and curr_qw != "N/A"
             and prev_qw != curr_qw
+            and is_finite_number(stock[i])
+            and is_finite_number(stock[i - 1])
         ):
             diffs_between.append(stock[i] - stock[i - 1])
 
@@ -706,6 +713,9 @@ def compute_basket_features(
     count_product_dict: Optional[dict[str, pd.Series]] = None,
     purchase_dict: Optional[dict[str, pd.Series]] = None,
     recap_dict: Optional[dict[str, pd.Series]] = None,
+    filter_level: str = "General",
+    general_filters: Optional[dict[str, object]] = None,
+    targeted_filters: Optional[dict[str, object]] = None,
 ) -> tuple[list[BasketResult], dict[str, BasketTimeSeries]]:
     """
     Core ETL: build per-basket summary results and time series.
@@ -720,6 +730,11 @@ def compute_basket_features(
         Sorted list of common year_week keys.
     min_*/max_*:
         Preprocessing filter bounds; data points outside are excluded.
+    filter_level:
+        Legacy single-set mode: bounds apply as General or Targeted.
+    general_filters / targeted_filters:
+        When either is provided, both levels are applied: General drops
+        out-of-range weeks, Targeted masks out-of-range metrics.
 
     Returns
     -------
@@ -744,9 +759,22 @@ def compute_basket_features(
         sum_sold = 0.0
         sum_m = 0.0
         sum_sold_price = 0.0
+        sum_sold_for_price = 0.0
         sum_stock = 0.0
+        n_stock = 0
         sum_count_product = 0.0
         sum_purchase = 0.0
+        general_bounds, targeted_bounds = resolve_level_bound_sets(
+            min_sold=min_sold,
+            max_sold=max_sold,
+            min_price=min_price,
+            max_price=max_price,
+            min_m=min_m,
+            max_m=max_m,
+            filter_level=filter_level,
+            general_filters=general_filters,
+            targeted_filters=targeted_filters,
+        )
 
         for w in weeks:
             try:
@@ -772,15 +800,33 @@ def compute_basket_features(
 
             if any(math.isnan(v) for v in (s, p, mv, stk)):
                 continue
+            if not (general_bounds["min_sold"] <= s <= general_bounds["max_sold"]):
+                continue
+            if not (general_bounds["min_price"] <= p <= general_bounds["max_price"]):
+                continue
+            if not (general_bounds["min_m"] <= mv <= general_bounds["max_m"]):
+                continue
 
-            if not (min_sold <= s <= max_sold):
-                continue
-            if not (min_price <= p <= max_price):
-                continue
-            if not (min_m <= mv <= max_m):
+            s = apply_metric_range(
+                s, targeted_bounds["min_sold"], targeted_bounds["max_sold"],
+            )
+            p = apply_metric_range(
+                p, targeted_bounds["min_price"], targeted_bounds["max_price"],
+            )
+            mv = apply_metric_range(
+                mv, targeted_bounds["min_m"], targeted_bounds["max_m"],
+            )
+            if not any(is_finite_number(v) for v in (s, p, mv, stk)):
                 continue
 
-            cost = ((s * p) - mv) / s if s > 0 else 0.0
+            if (
+                is_finite_number(s)
+                and is_finite_number(p)
+                and is_finite_number(mv)
+            ):
+                cost = ((s * p) - mv) / s if s > 0 else 0.0
+            else:
+                cost = float("nan")
 
             arr_sold.append(s)
             arr_price.append(p)
@@ -798,21 +844,26 @@ def compute_basket_features(
                 week_in_quad = 0
             arr_week_in_quad.append(week_in_quad)
 
-            sum_sold += s
-            sum_m += mv
-            sum_sold_price += s * p
-            sum_stock += stk
+            if is_finite_number(s):
+                sum_sold += s
+            if is_finite_number(mv):
+                sum_m += mv
+            if is_finite_number(s) and is_finite_number(p):
+                sum_sold_price += s * p
+                sum_sold_for_price += s
+            if is_finite_number(stk):
+                sum_stock += stk
+                n_stock += 1
             if not math.isnan(cp):
                 sum_count_product += cp
             if not math.isnan(pur):
                 sum_purchase += pur
 
-        if not arr_sold:
+        if not arr_weeks:
             continue
 
         corrs = compute_basket_correlations(arr_sold, arr_price, arr_m)
         av_w, av_b = compute_stock_trend_metrics(arr_stock, arr_qw)
-        n = len(arr_sold)
         avg_count_product = (
             sum_count_product / sum(not math.isnan(v) for v in arr_count_product)
             if any(not math.isnan(v) for v in arr_count_product)
@@ -823,8 +874,12 @@ def compute_basket_features(
             total_sold=sum_sold,
             total_m=sum_m,
             total_sold_price=sum_sold_price,
-            weighted_price=sum_sold_price / sum_sold if sum_sold > 0 else 0.0,
-            average_stock=sum_stock / n,
+            weighted_price=(
+                sum_sold_price / sum_sold_for_price
+                if sum_sold_for_price > 0
+                else 0.0
+            ),
+            average_stock=sum_stock / n_stock if n_stock else float("nan"),
             average_count_product=avg_count_product,
             total_purchase=sum_purchase if any(not math.isnan(v) for v in arr_purchase) else float("nan"),
             corr_SP=corrs["corr_SP"],
@@ -893,10 +948,19 @@ def compute_weekly_totals(
         for i, w in enumerate(ts.weeks):
             if w not in totals:
                 continue
-            totals[w].sum_sold += ts.sold[i]
-            totals[w].sum_m += ts.m[i]
-            totals[w].sum_sold_price += ts.sold[i] * ts.price[i]
-            totals[w].sum_stock += ts.stock[i]
+            sold_val = ts.sold[i]
+            price_val = ts.price[i]
+            m_val = ts.m[i]
+            stock_val = ts.stock[i]
+            if is_finite_number(sold_val):
+                totals[w].sum_sold += float(sold_val)
+            if is_finite_number(m_val):
+                totals[w].sum_m += float(m_val)
+            if is_finite_number(sold_val) and is_finite_number(price_val):
+                totals[w].sum_sold_price += float(sold_val) * float(price_val)
+                totals[w].sum_sold_for_price += float(sold_val)
+            if is_finite_number(stock_val):
+                totals[w].sum_stock += float(stock_val)
             if i < len(ts.count_product) and not math.isnan(ts.count_product[i]):
                 totals[w].sum_count_product += ts.count_product[i]
             if i < len(ts.purchase) and not math.isnan(ts.purchase[i]):

@@ -135,13 +135,20 @@ class WeeklyTotal:
     sum_count_product: float = 0.0
     sum_purchase: float = 0.0
     sum_recap: float = 0.0
+    sum_sold_for_price: float = 0.0
     quadweek: str = "N/A"
     week_in_quad: int = 0
     points: list[WeeklyPoint] = field(default_factory=list)
 
     @property
     def weighted_price(self) -> float:
-        return self.sum_sold_price / self.sum_sold if self.sum_sold > 0 else 0.0
+        if self.sum_sold_for_price > 0:
+            return self.sum_sold_price / self.sum_sold_for_price
+        if self.sum_sold_for_price == 0 and self.sum_sold_price > 0 and self.sum_sold > 0:
+            return self.sum_sold_price / self.sum_sold
+        if self.sum_sold > 0:
+            return float("nan")
+        return 0.0
 
 
 @dataclass

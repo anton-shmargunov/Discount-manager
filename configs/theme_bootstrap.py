@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import json
 
-from streamlit.components.v1 import html as component_html
-
 # Keep in sync with .streamlit/config.toml [theme] section.
 PBA_THEME: dict[str, str] = {
     "primaryColor": "#2563eb",
@@ -336,4 +334,9 @@ def apply_page_theme() -> None:
     import streamlit as st
 
     st.markdown(FORCE_LIGHT_CSS, unsafe_allow_html=True)
-    component_html(THEME_BOOTSTRAP_HTML, height=0)
+    if hasattr(st, "iframe"):
+        st.iframe(THEME_BOOTSTRAP_HTML, height=0)
+    else:
+        from streamlit.components.v1 import html as component_html
+
+        component_html(THEME_BOOTSTRAP_HTML, height=0)

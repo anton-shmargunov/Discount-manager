@@ -37,10 +37,12 @@ from core.analytics.cost_correction import (
     hybrid_margin_map,
 )
 from core.analytics.week_basket_tables import compute_basket_week_detail_rows
-from core.analytics.weighted_discount import (
-    DISCOUNT_PROM_WEIGHT_CHOICES,
+from core.analytics.selected_basket_weeks import (
     aggregate_selected_basket_weeks,
     combined_basket_time_series,
+)
+from core.analytics.weighted_discount import (
+    DISCOUNT_PROM_WEIGHT_CHOICES,
     discount_prom_weight_key,
     discount_prom_weight_prefix,
     weighted_discount_prom_series_all,

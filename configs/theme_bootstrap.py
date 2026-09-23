@@ -101,6 +101,17 @@ _FORCE_LIGHT_CSS_TEMPLATE = """
     .stApp [data-testid="stExpander"] summary {
         color: __TEXT_COLOR__ !important;
     }
+
+    /* st.iframe forbids height=0; collapse the 1px theme-bootstrap iframe. */
+    [data-testid="stIFrame"]:has(iframe[height="1"]),
+    [data-testid="stIFrame"]:has(iframe[height="1px"]) {
+        display: none !important;
+        height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: 0 !important;
+        overflow: hidden !important;
+    }
 </style>
 """
 
@@ -334,8 +345,9 @@ def apply_page_theme() -> None:
     import streamlit as st
 
     st.markdown(FORCE_LIGHT_CSS, unsafe_allow_html=True)
+    # st.iframe rejects height=0 (must be >0, "stretch", or "content").
     if hasattr(st, "iframe"):
-        st.iframe(THEME_BOOTSTRAP_HTML, height=0)
+        st.iframe(THEME_BOOTSTRAP_HTML, height=1)
     else:
         from streamlit.components.v1 import html as component_html
 

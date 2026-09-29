@@ -136,8 +136,13 @@ def main():
     )
     assert len(discount_rows) == len(detail_rows)
     assert discount_cols[0] == "Basket"
-    assert discount_cols[1] == "Campaign"
-    assert discount_cols[2] == "Job"
+    last_prom_idx = max(
+        i for i, col in enumerate(discount_cols)
+        if col in ("New Prom", "dProm") or col.startswith("Prom[")
+    )
+    assert discount_cols[last_prom_idx + 1] == "Campaign"
+    assert discount_cols[last_prom_idx + 2] == "Job"
+    assert discount_cols[last_prom_idx + 3] == "dSt_QW"
     assert "dSt_QW" in discount_cols
     assert "New Discount" in discount_cols
     assert "New Prom" in discount_cols

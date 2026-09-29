@@ -424,8 +424,6 @@ def build_week_discount_column_meta(
 
     meta: dict[str, dict[str, object]] = {
         "Basket": {"group": None, "offset": None, "is_delta": False},
-        "Campaign": {"group": None, "offset": None, "is_delta": False},
-        "Job": {"group": None, "offset": None, "is_delta": False},
     }
 
     meta["New Discount"] = {"group": "discount", "offset": 0, "is_delta": False}
@@ -443,6 +441,9 @@ def build_week_discount_column_meta(
             weekly_totals, weeks_by_offset[off], PROM_HEADER_PREFIX, week_offset=off,
         )
         meta[col] = {"group": "prom", "offset": off, "is_delta": False}
+
+    meta["Campaign"] = {"group": None, "offset": None, "is_delta": False}
+    meta["Job"] = {"group": None, "offset": None, "is_delta": False}
 
     stock_delta = "dSt_QW"
     meta[stock_delta] = {"group": "stock", "offset": None, "is_delta": True}

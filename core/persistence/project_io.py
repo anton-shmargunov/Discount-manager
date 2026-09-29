@@ -97,19 +97,49 @@ def _is_write_disallowed_widget_key(key: str) -> bool:
 
 
 class UnavailableWidgetState(dict):
-    """Stands in for a Streamlit widget-state class missing from this Streamlit version."""
+    """Stand-in for Streamlit widget-state objects. Those values are never restored."""
+
+    def __new__(cls, *args: object, **kwargs: object):
+        return dict.__new__(cls)
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        try:
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        except Exception:
+            pass
 
     def __setstate__(self, state: object) -> None:
-        pass
+        if isinstance(state, dict):
+            self.update(state)
+
+    def __call__(self, *args: object, **kwargs: object):
+        return UnavailableWidgetState(*args, **kwargs)
+
+
+def _aliased_numpy_module(module: str) -> str | None:
+    """Map NumPy 1.x ``numpy.core`` ↔ NumPy 2.x ``numpy._core`` pickle paths."""
+    pairs = (("numpy._core", "numpy.core"), ("numpy.core", "numpy._core"))
+    for source, dest in pairs:
+        if module == source or module.startswith(source + "."):
+            return dest + module[len(source) :]
+    return None
 
 
 class _ProjectUnpickler(pickle.Unpickler):
     def find_class(self, module: str, name: str):
+        # Never reconstruct Streamlit internals: class names move between
+        # Streamlit versions, and widget state cannot be assigned on restore.
+        if module.split(".")[0] == "streamlit":
+            return UnavailableWidgetState
         try:
             return super().find_class(module, name)
-        except (AttributeError, ImportError):
-            if module.split(".")[0] == "streamlit":
-                return UnavailableWidgetState
+        except (AttributeError, ImportError, ModuleNotFoundError):
+            aliased = _aliased_numpy_module(module)
+            if aliased is not None:
+                try:
+                    return super().find_class(aliased, name)
+                except (AttributeError, ImportError, ModuleNotFoundError):
+                    pass
             raise
 
 
@@ -118,6 +148,42 @@ def _is_streamlit_widget_state(value: object) -> bool:
     if isinstance(value, UnavailableWidgetState):
         return True
     return type(value).__module__.split(".")[0] == "streamlit"
+
+
+def _dataframe_without_arrow(frame: Any) -> Any:
+    """Store pandas columns as pickle-portable numpy/object dtypes, not pyarrow."""
+    try:
+        import pandas as pd
+    except ImportError:
+        return frame
+    if not isinstance(frame, pd.DataFrame):
+        return frame
+    arrow_cols = [
+        col
+        for col in frame.columns
+        if getattr(frame[col].dtype, "storage", None) == "pyarrow"
+        or str(frame[col].dtype) in {"str", "string", "string[pyarrow]"}
+    ]
+    if not arrow_cols:
+        return frame
+    converted = frame.copy()
+    for col in arrow_cols:
+        converted[col] = converted[col].astype(object)
+    return converted
+
+
+def _scopes_for_pickle(scopes: dict[str, Any]) -> dict[str, Any]:
+    packed: dict[str, Any] = {}
+    for key, scope in scopes.items():
+        if not isinstance(scope, dict):
+            packed[key] = scope
+            continue
+        copied = dict(scope)
+        hist = copied.get("discount_hist_df")
+        if hist is not None:
+            copied["discount_hist_df"] = _dataframe_without_arrow(hist)
+        packed[key] = copied
+    return packed
 
 
 def _can_pickle(value: object) -> bool:
@@ -164,7 +230,7 @@ def build_project_payload(session_state: Any) -> dict[str, Any]:
         "version": PROJECT_FORMAT_VERSION,
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "ui": collect_ui_session_state(session_state),
-        "scopes": scopes,
+        "scopes": _scopes_for_pickle(scopes),
         "log_messages": list(getattr(session_state, "log_messages", ["Ready."])),
     }
 
@@ -190,8 +256,12 @@ def unpack_project_bytes(data: bytes) -> dict[str, Any]:
     try:
         payload = _ProjectUnpickler(io.BytesIO(raw)).load()
     except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        if len(detail) > 180:
+            detail = detail[:177] + "..."
         raise ValueError(
-            "Project file could not be read (corrupt or incompatible)."
+            "Project file could not be read (corrupt or incompatible). "
+            f"{detail}"
         ) from exc
     if not isinstance(payload, dict):
         raise ValueError("Project file payload is invalid.")

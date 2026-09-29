@@ -1561,6 +1561,34 @@ def main():
     assert "pbs::scope::wd_filter_table_w" not in cloud_dest
     assert cloud_dest.fi_k == 3
 
+    from core.persistence.project_io import UnavailableWidgetState
+
+    class LiveEditorState:
+        def __init__(self):
+            self.edited_rows = {0: {"x": 1}}
+
+    LiveEditorState.__module__ = data_editor_mod.__name__
+    LiveEditorState.__qualname__ = "LiveEditorState"
+    setattr(data_editor_mod, "LiveEditorState", LiveEditorState)
+    try:
+        live_payload = dict(payload)
+        live_payload["ui"] = dict(payload["ui"])
+        live_payload["ui"]["pbs::scope::wd_filter_table_live"] = LiveEditorState()
+        live_blob = PROJECT_MAGIC + gzip.compress(
+            pickle.dumps(live_payload, protocol=pickle.HIGHEST_PROTOCOL)
+        )
+        live_restored = unpack_project_bytes(live_blob)
+        assert isinstance(
+            live_restored["ui"]["pbs::scope::wd_filter_table_live"],
+            UnavailableWidgetState,
+        )
+        live_dest = _FakeSession()
+        live_dest.log_messages = []
+        apply_project_payload(live_dest, live_restored)
+        assert "pbs::scope::wd_filter_table_live" not in live_dest
+    finally:
+        delattr(data_editor_mod, "LiveEditorState")
+
     button_keys = [
         "pbs::scope::planner_add_campaign",
         "pbs::scope::planner_delete_campaign",
@@ -1581,6 +1609,15 @@ def main():
     editor_session.log_messages = ["Ready."]
     editor_session["pbs::scope::wd_filter_table_w"] = GoneEditorState()
     assert "pbs::scope::wd_filter_table_w" not in build_project_payload(editor_session)["ui"]
+
+    arrow_hist = pd.DataFrame({"year_week": pd.array(["2026-39"], dtype="string")})
+    fake._pbs_scopes["pbs::TrackingBaskets_v2 - product_BS. on date of sale::Aggregated"][
+        "discount_hist_df"
+    ] = arrow_hist
+    packed_hist = build_project_payload(fake)["scopes"][
+        "pbs::TrackingBaskets_v2 - product_BS. on date of sale::Aggregated"
+    ]["discount_hist_df"]
+    assert str(packed_hist["year_week"].dtype) == "object"
 
     from core.analytics.planner import (
         add_campaign,

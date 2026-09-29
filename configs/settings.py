@@ -5,7 +5,7 @@ Application-wide constants and default analytical settings.
 from pathlib import Path
 
 APP_TITLE = "Pricing Correlation & Bucket Analysis"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.1.t1"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 

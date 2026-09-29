@@ -8,6 +8,7 @@ as a gzip-compressed pickle with a short magic header.
 from __future__ import annotations
 
 import gzip
+import io
 import pickle
 from datetime import datetime, timezone
 from typing import Any
@@ -57,6 +58,13 @@ _WRITE_DISALLOWED_KEY_FRAGMENTS = (
     "open_save_dialog",
     "restore_btn",
     "dialog_download",
+    "planner_add_campaign",
+    "planner_delete_campaign",
+    "planner_add_job",
+    "planner_delete_job",
+    "planner_update_job",
+    "planner_set_job_from_group",
+    "wd_strategy_save",
 )
 
 
@@ -88,6 +96,30 @@ def _is_write_disallowed_widget_key(key: str) -> bool:
     return any(fragment in lowered for fragment in _WRITE_DISALLOWED_KEY_FRAGMENTS)
 
 
+class UnavailableWidgetState(dict):
+    """Stands in for a Streamlit widget-state class missing from this Streamlit version."""
+
+    def __setstate__(self, state: object) -> None:
+        pass
+
+
+class _ProjectUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str):
+        try:
+            return super().find_class(module, name)
+        except (AttributeError, ImportError):
+            if module.split(".")[0] == "streamlit":
+                return UnavailableWidgetState
+            raise
+
+
+def _is_streamlit_widget_state(value: object) -> bool:
+    """Data editor / dataframe selection states cannot be written back to session_state."""
+    if isinstance(value, UnavailableWidgetState):
+        return True
+    return type(value).__module__.split(".")[0] == "streamlit"
+
+
 def _can_pickle(value: object) -> bool:
     try:
         pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
@@ -110,6 +142,8 @@ def collect_ui_session_state(session_state: Any) -> dict[str, Any]:
         # Uploaded files / Streamlit internal widgets often fail pickling.
         type_name = type(value).__name__
         if type_name in {"UploadedFile", "PagedUploadFile", "DeltaGenerator"}:
+            continue
+        if _is_streamlit_widget_state(value):
             continue
         if not _can_pickle(value):
             continue
@@ -154,7 +188,7 @@ def unpack_project_bytes(data: bytes) -> dict[str, Any]:
     except OSError as exc:
         raise ValueError("Project file is not a valid .disc_proj archive.") from exc
     try:
-        payload = pickle.loads(raw)
+        payload = _ProjectUnpickler(io.BytesIO(raw)).load()
     except Exception as exc:
         raise ValueError(
             "Project file could not be read (corrupt or incompatible)."
@@ -210,6 +244,8 @@ def apply_project_payload(session_state: Any, payload: dict[str, Any]) -> list[s
     for key, value in ui.items():
         key_str = str(key)
         if _is_write_disallowed_widget_key(key_str):
+            continue
+        if _is_streamlit_widget_state(value):
             continue
         session_state[key_str] = value
         restored_keys += 1

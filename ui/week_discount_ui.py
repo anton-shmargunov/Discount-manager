@@ -524,7 +524,7 @@ def _render_discount_strategy_settings(
                 hide_index=True,
                 use_container_width=True,
                 num_rows="dynamic",
-                key=(
+                key=wk(
                     f"wd_strat_margin_cats_v{DISCOUNT_SETTINGS_UI_VERSION}_{editor_key}"
                 ),
                 column_config={

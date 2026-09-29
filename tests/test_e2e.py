@@ -1534,6 +1534,54 @@ def main():
     assert any("restored" in line.lower() for line in messages)
     print(f"  Project bytes: {len(blob):,}")
 
+    import gzip
+    import pickle
+    import streamlit.elements.widgets.data_editor as data_editor_mod
+
+    class GoneEditorState:
+        def __init__(self):
+            self.edited_rows = {0: {"x": 1}}
+
+    GoneEditorState.__module__ = data_editor_mod.__name__
+    GoneEditorState.__qualname__ = "GoneEditorState"
+    setattr(data_editor_mod, "GoneEditorState", GoneEditorState)
+    try:
+        cloud_payload = dict(payload)
+        cloud_payload["ui"] = dict(payload["ui"])
+        cloud_payload["ui"]["pbs::scope::wd_filter_table_w"] = GoneEditorState()
+        cloud_blob = PROJECT_MAGIC + gzip.compress(
+            pickle.dumps(cloud_payload, protocol=pickle.HIGHEST_PROTOCOL)
+        )
+    finally:
+        delattr(data_editor_mod, "GoneEditorState")
+    cloud_restored = unpack_project_bytes(cloud_blob)
+    cloud_dest = _FakeSession()
+    cloud_dest.log_messages = []
+    apply_project_payload(cloud_dest, cloud_restored)
+    assert "pbs::scope::wd_filter_table_w" not in cloud_dest
+    assert cloud_dest.fi_k == 3
+
+    button_keys = [
+        "pbs::scope::planner_add_campaign",
+        "pbs::scope::planner_delete_campaign",
+        "pbs::scope::planner_add_job",
+        "pbs::scope::planner_delete_job",
+        "pbs::scope::planner_update_job",
+        "pbs::scope::planner_set_job_from_group",
+        "pbs::scope::wd_strategy_save_2026-39",
+    ]
+    button_payload = dict(payload)
+    button_payload["ui"] = {**payload["ui"], **{key: False for key in button_keys}}
+    button_dest = _FakeSession()
+    button_dest.log_messages = []
+    apply_project_payload(button_dest, button_payload)
+    assert not any(key in button_dest for key in button_keys)
+
+    editor_session = _FakeSession()
+    editor_session.log_messages = ["Ready."]
+    editor_session["pbs::scope::wd_filter_table_w"] = GoneEditorState()
+    assert "pbs::scope::wd_filter_table_w" not in build_project_payload(editor_session)["ui"]
+
     from core.analytics.planner import (
         add_campaign,
         add_job,

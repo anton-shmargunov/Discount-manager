@@ -40,12 +40,15 @@ def generate_week_prom_values(
     rows: list[dict],
     filter_map: dict[str, str],
     settings: PromStrategySettings,
+    basket_ids: set[str] | None = None,
 ) -> dict[str, float]:
-    """Return {basket: Prom[new]} for all rows."""
+    """Return {basket: Prom[new]} for matching rows."""
     generated: dict[str, float] = {}
     for row in rows:
         basket = str(row.get("Basket", ""))
         if not basket:
+            continue
+        if basket_ids is not None and basket not in basket_ids:
             continue
         value = compute_new_prom_value(row, filter_map, settings)
         generated[basket] = (

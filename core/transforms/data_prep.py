@@ -1042,6 +1042,10 @@ DISCOUNT_HIST_EXPORT_COLUMNS: list[str] = [
     "Prom, BasketDiscountOutOfMarketByCondition",
     "Prom, BasketDiscountOutOfMarketByMinPrice",
     "Prom, none",
+    "campaign_id",
+    "campaign_name",
+    "job_id",
+    "job_name",
 ]
 
 # Discount / prom value columns only (exclude week + basket metadata).
@@ -1054,6 +1058,10 @@ DISCOUNT_HIST_VALUE_COLUMNS: list[str] = [
         "week in quad (1_4)",
         "",
         "basket",
+        "campaign_id",
+        "campaign_name",
+        "job_id",
+        "job_name",
     }
 ]
 
@@ -1140,6 +1148,7 @@ def build_discount_hist_export_rows(
     *,
     new_discount_column: str = "New Discount",
     new_prom_column: str = "New Prom",
+    assignments: dict[str, object] | None = None,
 ) -> list[dict]:
     """
     Build discount-history CSV rows from Week Discount New Discount / New Prom.
@@ -1182,6 +1191,13 @@ def build_discount_hist_export_rows(
             or (isinstance(prom_val, float) and math.isnan(prom_val))
         ):
             hist_row[prom_col] = _format_discount_hist_export_value(prom_val)
+
+        info = (assignments or {}).get(basket)
+        if info is not None:
+            hist_row["campaign_id"] = getattr(info, "campaign_id", "") or ""
+            hist_row["campaign_name"] = getattr(info, "campaign_name", "") or ""
+            hist_row["job_id"] = getattr(info, "job_id", "") or ""
+            hist_row["job_name"] = getattr(info, "job_name", "") or ""
 
         hist_rows.append(hist_row)
 
@@ -1383,6 +1399,10 @@ def combine_discount_hist_export_by_category(
                     "week in quad (1_4)",
                     "",
                     "basket",
+                    "campaign_id",
+                    "campaign_name",
+                    "job_id",
+                    "job_name",
                 ):
                     base[meta_col] = row.get(meta_col, "")
                 base["basket"] = basket
@@ -1398,6 +1418,10 @@ def combine_discount_hist_export_by_category(
                 "year_week",
                 "week from y_w (1_52)",
                 "week in quad (1_4)",
+                "campaign_id",
+                "campaign_name",
+                "job_id",
+                "job_name",
             ):
                 if _is_blank_discount_hist_value(target.get(meta_col)) and not (
                     _is_blank_discount_hist_value(row.get(meta_col))

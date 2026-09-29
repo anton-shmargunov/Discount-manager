@@ -683,12 +683,15 @@ def generate_week_discount_values(
     column_meta: dict[str, dict[str, object]],
     filter_map: dict[str, str],
     settings: DiscountStrategySettings,
+    basket_ids: set[str] | None = None,
 ) -> dict[str, float]:
-    """Return {basket: Discount[new]} for all rows."""
+    """Return {basket: Discount[new]} for matching rows."""
     generated: dict[str, float] = {}
     for row in rows:
         basket = str(row.get("Basket", ""))
         if not basket:
+            continue
+        if basket_ids is not None and basket not in basket_ids:
             continue
         generated[basket] = round(
             compute_new_discount_value(row, column_meta, filter_map, settings),

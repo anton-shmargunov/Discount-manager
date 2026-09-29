@@ -37,6 +37,7 @@ from core.analytics.cost_correction import (
     hybrid_margin_map,
 )
 from core.analytics.week_basket_tables import compute_basket_week_detail_rows
+from core.analytics.selected_basket_margin import selected_baskets_margin_corrected
 from core.analytics.selected_basket_weeks import (
     aggregate_selected_basket_weeks,
     combined_basket_time_series,
@@ -47,8 +48,15 @@ from core.analytics.weighted_discount import (
     discount_prom_weight_prefix,
     weighted_discount_prom_series_all,
 )
+from core.analytics.planner import (
+    add_job,
+    assignment_columns,
+    focused_baskets,
+    get_campaign,
+)
 from ui.week_discount_ui import render_week_discount_section
 from ui.project_save_ui import apply_pending_project_restore, render_sidebar_project_panel
+from ui.planner_ui import begin_job_assignment, render_sidebar_planner_panel
 from ui.product_bs_scope import (
     AGGREGATED_DISCOUNT_HIST_CATEGORY,
     PRODUCT_BS_CATEGORY_OPTIONS,
@@ -1733,6 +1741,11 @@ if input_mode in PRODUCT_BS_INPUT_MODES:
 
 pbs_scope_key = product_bs_scope_key(input_mode, product_bs_category)
 pbs_scope = get_product_bs_scope(ss, pbs_scope_key)
+planner = render_sidebar_planner_panel(
+    pbs_scope,
+    pbs_scope_key,
+    selected_baskets=list(pbs_scope.get("selected_baskets") or []),
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2012,6 +2025,8 @@ for b in result.basket_results:
     row = {
         "Basket":      b.basket,
         "Group":       group_label,
+        "Campaign":    assignment_columns(planner, b.basket)[0],
+        "Job":         assignment_columns(planner, b.basket)[1],
         "W. Price":    round(b.weighted_price, 2),
         "Total Sold":  round(b.total_sold, 2),
         "Total Margin":     round(b.total_m, 2),
@@ -2054,6 +2069,15 @@ for b in result.basket_results:
     basket_rows.append(row)
 
 df_table = pd.DataFrame(basket_rows)
+planner_focus = focused_baskets(planner)
+if planner_focus and "Basket" in df_table.columns:
+    focus_rank = {str(name): idx for idx, name in enumerate(planner_focus)}
+    df_table = df_table.assign(
+        _planner_rank=df_table["Basket"].astype(str).map(
+            lambda name: focus_rank.get(str(name), len(focus_rank))
+        )
+    ).sort_values(["_planner_rank"], kind="stable").drop(columns=["_planner_rank"])
+    df_table = df_table.reset_index(drop=True)
 
 fit_ps_col, fit_pss_col, fit_cp_col, exp_col, _ = st.columns([1, 1, 1, 1, 2])
 if fit_ps_col.button("Fit Price x Sold", use_container_width=True):
@@ -2090,6 +2114,7 @@ exp_col.download_button(
 
 basket_weight_metric = "stock"
 use_basket_multiselect = False
+use_basket_select_all = False
 preview_group = None
 group_labels: list[str] = []
 if "Group" in df_table.columns:
@@ -2111,12 +2136,49 @@ with st.expander("Combination", expanded=False):
     )
     if preview_group_choice != "None":
         preview_group = preview_group_choice
+    set_job_disabled = (
+        preview_group is None
+        or get_campaign(planner, planner.get("selected_campaign_id")) is None
+    )
+    if group_col.button(
+        "Set a Job",
+        key=sk("planner_set_job_from_group"),
+        disabled=set_job_disabled,
+        help=(
+            "Create a new Job in the selected Campaign from this Group "
+            "as it is now. Baskets already in other Jobs need approval."
+        ),
+        use_container_width=True,
+    ):
+        campaign_id = str(planner.get("selected_campaign_id") or "")
+        job = add_job(
+            planner,
+            campaign_id,
+            f"Group {preview_group}",
+        )
+        group_members = [
+            str(basket)
+            for basket in df_table.loc[
+                df_table["Group"].astype(str) == str(preview_group),
+                "Basket",
+            ].tolist()
+            if str(basket) in result.basket_data
+        ]
+        begin_job_assignment(planner, str(job["id"]), group_members)
+        st.rerun()
     use_basket_multiselect = ms_col.toggle(
         "Multiselect",
         value=False,
         key=sk("basket_multiselect"),
         help="Select several baskets in the table to sum Week Progress like Sum-Up.",
     )
+    if use_basket_multiselect:
+        use_basket_select_all = ms_col.toggle(
+            "Select All",
+            value=False,
+            key=sk("basket_select_all"),
+            help="Use every basket in the table as the Multiselect selection.",
+        )
     show_weights = bool(preview_group) or use_basket_multiselect
     if show_weights:
         basket_weight_label = weight_col.selectbox(
@@ -2187,6 +2249,14 @@ basket_table_column_config = {
     "Group": st.column_config.TextColumn(
         "Group",
         help="Cluster or octant group assigned to the basket. A dash means no group is assigned.",
+    ),
+    "Campaign": st.column_config.TextColumn(
+        "Campaign",
+        help="Planner Campaign that currently owns this basket, if any.",
+    ),
+    "Job": st.column_config.TextColumn(
+        "Job",
+        help="Planner Job that currently owns this basket, if any.",
     ),
     "W. Price": st.column_config.NumberColumn(
         "W. Price",
@@ -2339,7 +2409,9 @@ tbl_event = st.dataframe(
     key=sk(
         f"basket_table_{int(show_price_sold_fit)}_"
         f"{int(show_price_stock_sold_fit)}_{int(show_cost_price_fit)}_"
-        f"{int(use_basket_multiselect)}"
+        f"{int(use_basket_multiselect)}_"
+        f"{planner.get('selected_campaign_id')}_"
+        f"{'-'.join(planner.get('selected_job_ids') or [])}"
     ),
     column_config=basket_table_column_config,
 )
@@ -2356,6 +2428,14 @@ if preview_group:
     ]
     scope["selected_baskets"] = group_baskets
     scope["selected_basket"] = group_baskets[0] if group_baskets else None
+elif use_basket_select_all:
+    all_baskets = [
+        str(basket)
+        for basket in df_table["Basket"].tolist()
+        if str(basket) in result.basket_data
+    ]
+    scope["selected_baskets"] = all_baskets
+    scope["selected_basket"] = all_baskets[0] if all_baskets else None
 elif sel_rows:
     chosen_baskets = [
         str(df_table.iloc[idx]["Basket"])
@@ -2364,6 +2444,15 @@ elif sel_rows:
     ]
     scope["selected_baskets"] = chosen_baskets
     scope["selected_basket"] = chosen_baskets[-1] if chosen_baskets else None
+elif planner_focus:
+    focus_in_data = [
+        name for name in planner_focus if name in result.basket_data
+    ]
+    scope["selected_baskets"] = focus_in_data
+    scope["selected_basket"] = focus_in_data[0] if focus_in_data else None
+elif scope.get("basket_select_all"):
+    scope["selected_baskets"] = []
+    scope["selected_basket"] = None
 elif use_basket_multiselect:
     if not scope.get("selected_baskets") and scope.get("selected_basket"):
         scope["selected_baskets"] = [str(scope["selected_basket"])]
@@ -2371,6 +2460,7 @@ else:
     scope["selected_baskets"] = (
         [str(scope["selected_basket"])] if scope.get("selected_basket") else []
     )
+scope["basket_select_all"] = use_basket_select_all and not preview_group
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ⑥ Basket Drill-Down
@@ -2381,13 +2471,15 @@ detail_baskets = _detail_baskets_from_scope(scope, result.basket_data)
 if len(detail_baskets) > 1:
     if preview_group:
         detail_label = preview_group
+    elif scope.get("basket_select_all"):
+        detail_label = "All baskets"
     elif len(detail_baskets) <= 6:
         detail_label = ", ".join(detail_baskets)
     else:
         detail_label = f"{len(detail_baskets)} baskets"
     st.divider()
     st.subheader(f"⑥ Basket Detail: **{detail_label}**")
-    if preview_group or len(detail_baskets) > 6:
+    if preview_group or scope.get("basket_select_all") or len(detail_baskets) > 6:
         st.caption(
             f"{len(detail_baskets)} baskets"
             + (": " + ", ".join(detail_baskets) if len(detail_baskets) <= 12 else "")
@@ -2424,9 +2516,20 @@ if len(detail_baskets) > 1:
     )
     week_labels = list(selected_agg["weeks"])
     quadweeks = list(selected_agg["quadweeks"])
+    multi_correction = selected_baskets_margin_corrected(
+        result.basket_data,
+        detail_baskets,
+        week_labels,
+        basket_corrections,
+        weighted_price=list(selected_agg["weighted_price"]),
+    )
+    multi_correction_applied = bool(multi_correction["applied"])
+    use_margin_corrected = bool(correct_margin) and multi_correction_applied
+    multi_margin_hybrid = list(multi_correction["margin_hybrid"])
     chart_state_key = (
         f"{show_qw}_{show_line}_{show_qw_avg}_{basket_weight_metric}_"
-        f"{len(detail_baskets)}"
+        f"{len(detail_baskets)}_{int(multi_correction_applied)}_"
+        f"{int(use_margin_corrected)}_{cost_correction_mode}_{int(skip_last_points)}"
     )
 
     with st.expander("📈 Week Progress", expanded=True):
@@ -2437,6 +2540,26 @@ if len(detail_baskets) > 1:
         if enabled_progress:
             prog_cols = st.columns(2)
             for idx, spec in enumerate(enabled_progress):
+                overlay_values = None
+                overlay_name = ""
+                if multi_correction_applied and spec["key"] == "cost_per_sold":
+                    overlay_values = multi_correction["cost_corrected"]
+                    overlay_name = "Cost Corrected"
+                elif use_margin_corrected and spec["key"] == "margin":
+                    overlay_values = multi_correction["margin_corrected"]
+                    overlay_name = "Margin Corrected"
+                elif use_margin_corrected and spec["key"] == "mtost":
+                    overlay_values = ratio_series(
+                        multi_margin_hybrid,
+                        selected_agg["stock"],
+                    )
+                    overlay_name = "MtoSt Corrected"
+                elif use_margin_corrected and spec["key"] == "mtosold":
+                    overlay_values = ratio_series(
+                        multi_margin_hybrid,
+                        selected_agg["sold"],
+                    )
+                    overlay_name = "MtoSold Corrected"
                 with prog_cols[idx % 2]:
                     st.plotly_chart(
                         build_metric_progress(
@@ -2450,6 +2573,8 @@ if len(detail_baskets) > 1:
                             quadweeks=quadweeks,
                             use_qw_colors=show_qw,
                             show_qw_average=show_qw_avg,
+                            overlay_values=overlay_values,
+                            overlay_name=overlay_name,
                         ),
                         use_container_width=True,
                         key=sk(
@@ -2477,8 +2602,13 @@ if len(detail_baskets) > 1:
             show_line=show_line,
             show_qw_avg=show_qw_avg,
             chart_state_key=f"{chart_state_key}_{combo_key}",
-            plot_margin=None,
-            skipped_note="",
+            plot_margin=multi_margin_hybrid if use_margin_corrected else None,
+            skipped_note=(
+                "Note: skipped Cost vs Price weeks use the sum of per-basket "
+                "Margin Corrected (original margin on kept weeks)."
+                if use_margin_corrected
+                else ""
+            ),
             bulk_cost_fit=None,
             scope=scope,
             sk=sk,
@@ -3238,6 +3368,7 @@ if scope["selected_week"] and scope["selected_week"] in result.weekly_totals:
             pbs_scope.get("discount_hist_df"),
             input_mode=input_mode,
             margin_by_basket=scope.get("basket_margin_hybrid"),
+            planner=planner,
         )
 
     with st.expander(f"📅 Week Visualization: {selected_week}", expanded=False):

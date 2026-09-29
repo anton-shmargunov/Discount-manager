@@ -63,6 +63,7 @@ def default_product_bs_scope_state() -> dict[str, Any]:
         "sumup_select_generation": 0,
         "build_message": None,
         "discount_hist_df": None,
+        "planner": None,
     }
 
 

@@ -274,7 +274,7 @@ def week_discount_column_group(column: str) -> Optional[tuple[str, bool]]:
 
     Returns None for Basket and unknown columns.
     """
-    if column == "Basket":
+    if column in ("Basket", "Campaign", "Job"):
         return None
     if column in _DELTA_COLUMN_TO_GROUP:
         return _DELTA_COLUMN_TO_GROUP[column], True
@@ -321,7 +321,7 @@ def week_discount_column_background(column: str) -> Optional[str]:
 
 def week_discount_value_kind(column: str) -> str:
     """Return display/filter kind: text, delta_pct, integer, currency, mtost."""
-    if column == "Basket":
+    if column in ("Basket", "Campaign", "Job"):
         return "text"
     grouped = week_discount_column_group(column)
     if grouped is None:
@@ -424,6 +424,8 @@ def build_week_discount_column_meta(
 
     meta: dict[str, dict[str, object]] = {
         "Basket": {"group": None, "offset": None, "is_delta": False},
+        "Campaign": {"group": None, "offset": None, "is_delta": False},
+        "Job": {"group": None, "offset": None, "is_delta": False},
     }
 
     meta["New Discount"] = {"group": "discount", "offset": 0, "is_delta": False}
@@ -525,8 +527,8 @@ def select_visible_week_discount_columns(
     visible: list[str] = []
     for col in columns:
         meta = column_meta.get(col)
-        if col == "Basket" or meta is None:
-            if col == "Basket":
+        if col in {"Basket", "Campaign", "Job"} or meta is None:
+            if col in {"Basket", "Campaign", "Job"}:
                 visible.append(col)
             continue
 

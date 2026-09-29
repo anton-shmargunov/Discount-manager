@@ -136,6 +136,8 @@ def main():
     )
     assert len(discount_rows) == len(detail_rows)
     assert discount_cols[0] == "Basket"
+    assert discount_cols[1] == "Campaign"
+    assert discount_cols[2] == "Job"
     assert "dSt_QW" in discount_cols
     assert "New Discount" in discount_cols
     assert "New Prom" in discount_cols
@@ -188,7 +190,7 @@ def main():
     assert all(
         wd_meta[col].get("offset") != -1 or wd_meta[col].get("is_delta")
         for col in visible_no_w1
-        if col != "Basket"
+        if col not in {"Basket", "Campaign", "Job"}
     )
     filtered = apply_week_discount_filters(
         discount_rows,
@@ -934,6 +936,56 @@ def main():
             break
     assert changed, "Margin Corrected should change Week Discount Margin/dM_QW for at least one basket"
 
+    from core.analytics.selected_basket_margin import selected_baskets_margin_corrected
+    from core.analytics.selected_basket_weeks import aggregate_selected_basket_weeks
+
+    corrected_name = next(
+        name for name, corr in bulk_corrections.items() if corr.applied
+    )
+    one_ts = result.basket_data[corrected_name]
+    one_corr = selected_baskets_margin_corrected(
+        result.basket_data,
+        [corrected_name],
+        [str(w) for w in one_ts.weeks],
+        bulk_corrections,
+    )
+    assert one_corr["applied"]
+    for got, want in zip(
+        one_corr["margin_hybrid"], bulk_corrections[corrected_name].margin_hybrid
+    ):
+        if math.isfinite(want):
+            assert abs(got - want) < 1e-9
+
+    multi_names = list(result.basket_data)[:5]
+    if corrected_name not in multi_names:
+        multi_names.append(corrected_name)
+    multi_agg = aggregate_selected_basket_weeks(
+        result.basket_data, multi_names, result.all_weeks,
+    )
+    multi_corr = selected_baskets_margin_corrected(
+        result.basket_data,
+        multi_names,
+        list(multi_agg["weeks"]),
+        bulk_corrections,
+        weighted_price=list(multi_agg["weighted_price"]),
+    )
+    assert multi_corr["applied"], "Multiselect should get Margin Corrected"
+    assert len(multi_corr["margin_hybrid"]) == len(multi_agg["weeks"])
+    corrected_weeks = [
+        i for i, v in enumerate(multi_corr["margin_corrected"]) if math.isfinite(v)
+    ]
+    assert corrected_weeks
+    for i, (hyb, orig) in enumerate(zip(multi_corr["margin_hybrid"], multi_agg["margin"])):
+        if i not in corrected_weeks and math.isfinite(orig):
+            assert abs(hyb - orig) < 1e-6, "Kept weeks should keep original margin sum"
+    i = corrected_weeks[-1]
+    if multi_agg["sold"][i] > 0 and math.isfinite(multi_corr["cost_corrected"][i]):
+        expected = (
+            multi_agg["weighted_price"][i]
+            - multi_corr["margin_hybrid"][i] / multi_agg["sold"][i]
+        )
+        assert abs(multi_corr["cost_corrected"][i] - expected) < 1e-6
+
     if pf:
         print(f"  Sold plane  z0={pf.z0:.6f}  a={pf.a:.6f}  b={pf.b:.6f}  adjR2={pf.adj_r2:.4f}")
     else:
@@ -1476,6 +1528,153 @@ def main():
     assert "pbs::scope::manual_edit_btn" not in dest
     assert any("restored" in line.lower() for line in messages)
     print(f"  Project bytes: {len(blob):,}")
+
+    from core.analytics.planner import (
+        add_campaign,
+        add_job,
+        apply_job_assignment,
+        assignment_lookup,
+        empty_planner_dict,
+        find_assignment_conflicts,
+        serialize_discount_settings,
+        store_default_settings,
+        target_baskets_for_generate,
+    )
+    from core.analytics.discount_strategy import default_discount_strategy_settings
+    from core.analytics.prom_strategy import PromStrategySettings
+
+    planner = empty_planner_dict()
+    camp_a = add_campaign(planner, "Prom research")
+    camp_b = add_campaign(planner, "Low margin")
+    job_a = add_job(planner, camp_a["id"], "Job A", basket_ids=["1111"])
+    job_b = add_job(planner, camp_a["id"], "Job B", basket_ids=["2222"])
+    job_d = add_job(planner, camp_b["id"], "Job D")
+    conflicts = find_assignment_conflicts(
+        planner, job_d["id"], ["1111", "2222", "3333"],
+    )
+    assert {item.basket for item in conflicts} == {"1111", "2222"}
+    stats = apply_job_assignment(
+        planner, job_d["id"], ["1111", "2222", "3333"], {"1111"},
+    )
+    assert stats["added"] == 1
+    assert stats["moved"] == 1
+    assert stats["kept"] == 1
+    assert "1111" in job_d["basket_ids"]
+    assert "3333" in job_d["basket_ids"]
+    assert "2222" not in job_d["basket_ids"]
+    assert "2222" in job_b["basket_ids"]
+    assert "1111" not in job_a["basket_ids"]
+
+    store_default_settings(
+        planner,
+        default_discount_strategy_settings(),
+        PromStrategySettings(),
+    )
+    job_d["discount_settings"] = serialize_discount_settings(
+        default_discount_strategy_settings()
+    )
+    scoped = target_baskets_for_generate(
+        planner, ["1111", "2222", "3333", "4444"],
+        campaign_switch_on=False,
+        all_jobs=False,
+    )
+    assert scoped == {"4444"}
+    planner["selected_job_ids"] = [job_d["id"]]
+    scoped_on = target_baskets_for_generate(
+        planner, ["1111", "2222", "3333", "4444"],
+        campaign_switch_on=True,
+        all_jobs=False,
+    )
+    assert scoped_on == {"1111", "3333"}
+    all_targets = target_baskets_for_generate(
+        planner, ["1111", "2222", "3333", "4444"],
+        campaign_switch_on=True,
+        all_jobs=True,
+    )
+    assert all_targets == {"1111", "2222", "3333", "4444"}
+
+    hist_assigned = build_discount_hist_export_rows(
+        [{"Basket": "1111", "New Discount": -0.1, "New Prom": 0.0}],
+        meta_mid,
+        "Aggregated",
+        assignments=assignment_lookup(planner),
+    )
+    assert hist_assigned[0]["campaign_name"] == "Low margin"
+    assert hist_assigned[0]["job_name"] == "Job D"
+    assert hist_assigned[0]["campaign_id"] == camp_b["id"]
+    assert len(hist_assigned[0]["job_id"]) == 10
+
+    from configs.settings import STRATEGIES_V1_PATH
+    from core.analytics.discount_strategy import (
+        DiscountStrategySettings,
+        generate_week_discount_values,
+        load_discount_strategy_settings,
+    )
+    from core.analytics.planner import (
+        ensure_planner_dict,
+        generate_discount_all_jobs,
+        serialize_discount_settings,
+    )
+    from core.analytics.week_basket_tables import (
+        build_week_discount_column_meta,
+        compute_basket_week_discount_rows,
+        week_discount_filter_columns,
+    )
+
+    file_defaults = load_discount_strategy_settings(STRATEGIES_V1_PATH)
+    builtin_payload = serialize_discount_settings(default_discount_strategy_settings())
+    legacy = {
+        "campaigns": [{"id": "0000000001", "name": "C"}],
+        "jobs": [{
+            "id": "0000000002",
+            "name": "J",
+            "campaign_id": "0000000001",
+            "basket_ids": [],
+            "discount_settings": dict(builtin_payload),
+        }],
+        "default_discount_settings": dict(builtin_payload),
+    }
+    migrated = ensure_planner_dict(legacy, file_defaults)
+    file_payload = serialize_discount_settings(file_defaults)
+    assert migrated["default_discount_settings"] == file_payload
+    assert migrated["jobs"][0]["discount_settings"] == file_payload
+
+    week = str(result.all_weeks[-1])
+    wd_rows, _ = compute_basket_week_discount_rows(
+        result.basket_data, result.weekly_totals, result.all_weeks, week,
+    )
+    wd_meta = build_week_discount_column_meta(
+        result.weekly_totals, result.all_weeks, week,
+    )
+    wd_filter_map = week_discount_filter_columns(wd_meta)
+    row_baskets = [str(r["Basket"]) for r in wd_rows]
+    zero_job_basket, default_basket = row_baskets[0], row_baskets[1]
+    gen_planner = empty_planner_dict(file_defaults)
+    gen_camp = add_campaign(gen_planner, "Gen")
+    add_job(
+        gen_planner,
+        gen_camp["id"],
+        "Zero",
+        basket_ids=[zero_job_basket],
+        discount_settings=serialize_discount_settings(
+            DiscountStrategySettings(mode="Zero all Discounts")
+        ),
+    )
+    all_generated = generate_discount_all_jobs(
+        wd_rows, wd_meta, wd_filter_map, gen_planner,
+    )
+    assert set(all_generated) == set(row_baskets)
+    assert all_generated[zero_job_basket] == 0.0
+    expected_default = generate_week_discount_values(
+        wd_rows, wd_meta, wd_filter_map, file_defaults,
+        basket_ids={default_basket},
+    )
+    assert all_generated[default_basket] == expected_default[default_basket]
+    unassigned_ids = target_baskets_for_generate(
+        gen_planner, row_baskets, campaign_switch_on=False, all_jobs=False,
+    )
+    assert zero_job_basket not in unassigned_ids
+    assert default_basket in unassigned_ids
 
     print("\nALL TESTS PASSED")
 

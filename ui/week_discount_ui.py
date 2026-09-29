@@ -12,6 +12,18 @@ import math
 import pandas as pd
 import streamlit as st
 
+from core.analytics.planner import (
+    annotate_week_discount_rows,
+    assignment_lookup,
+    deserialize_discount_settings,
+    deserialize_prom_settings,
+    generate_discount_all_jobs,
+    generate_prom_all_jobs,
+    selected_job_targets,
+    store_default_settings,
+    apply_settings_to_jobs,
+    target_baskets_for_generate,
+)
 from core.analytics.discount_strategy import (
     GENERATION_MODES,
     MARGIN_MODES,
@@ -325,29 +337,41 @@ def _margin_categories_from_df(df: pd.DataFrame) -> list[MarginCategory]:
     return categories
 
 
-def _render_discount_strategy_settings(selected_week: str, scope_key: str) -> DiscountStrategySettings:
+def _option_index(options: tuple[str, ...] | list[str], value: str) -> int:
+    try:
+        return list(options).index(value)
+    except ValueError:
+        return 0
+
+
+def _render_discount_strategy_settings(
+    selected_week: str,
+    scope_key: str,
+    initial: DiscountStrategySettings,
+    editor_id: str,
+) -> DiscountStrategySettings:
     def wk(widget_key: str) -> str:
         return scoped_widget_key(scope_key, widget_key)
 
-    defaults = _cached_discount_strategy_defaults()
     settings = DiscountStrategySettings(
-        conservative=defaults.conservative,
-        moderate=defaults.moderate,
-        strong=defaults.strong,
-        mtost=defaults.mtost,
-        margin_categories=list(defaults.margin_categories),
-        sold_zero_strategy=defaults.sold_zero_strategy,
-        sold_zero_balance=defaults.sold_zero_balance,
-        mtost_strategy_enabled=defaults.mtost_strategy_enabled,
-        mtost_balance=defaults.mtost_balance,
+        conservative=initial.conservative,
+        moderate=initial.moderate,
+        strong=initial.strong,
+        mtost=initial.mtost,
+        margin_categories=list(initial.margin_categories),
+        sold_zero_strategy=initial.sold_zero_strategy,
+        sold_zero_balance=initial.sold_zero_balance,
+        mtost_strategy_enabled=initial.mtost_strategy_enabled,
+        mtost_balance=initial.mtost_balance,
     )
+    editor_key = f"{selected_week}_{editor_id}"
 
     with st.expander("Discount strategy", expanded=False):
         settings.mode = st.selectbox(
             "Discount generation mode",
             GENERATION_MODES,
-            index=GENERATION_MODES.index("Based on Strategies"),
-            key=wk(f"wd_strat_mode_{selected_week}"),
+            index=_option_index(GENERATION_MODES, initial.mode),
+            key=wk(f"wd_strat_mode_{editor_key}"),
         )
 
         st.markdown("**Strategies**")
@@ -358,30 +382,30 @@ def _render_discount_strategy_settings(selected_week: str, scope_key: str) -> Di
         strat_col1, strat_col2 = st.columns(2)
         settings.balance = strat_col1.number_input(
             "Balance (%)",
-            value=0.0,
+            value=float(initial.balance) * 100.0,
             step=1.0,
             format="%.2f",
-            key=wk(f"wd_strat_balance_{selected_week}"),
+            key=wk(f"wd_strat_balance_{editor_key}"),
             help="Shifts strategy dDiscount before applying the multiplicator.",
         ) / 100.0
         settings.multiplicator = strat_col2.number_input(
             "Multiplicator",
-            value=1.0,
+            value=float(initial.multiplicator),
             step=0.1,
             format="%.2f",
-            key=wk(f"wd_strat_mult_{selected_week}"),
+            key=wk(f"wd_strat_mult_{editor_key}"),
         )
 
         zero_col1, zero_col2 = st.columns(2)
         settings.zero_d_st_negative = zero_col1.checkbox(
             "dDiscount=0 when dSt_QW < 0",
-            value=False,
-            key=wk(f"wd_strat_zero_neg_{selected_week}"),
+            value=bool(initial.zero_d_st_negative),
+            key=wk(f"wd_strat_zero_neg_{editor_key}"),
         )
         settings.zero_d_st_positive = zero_col2.checkbox(
             "dDiscount=0 when dSt_QW > 0",
-            value=False,
-            key=wk(f"wd_strat_zero_pos_{selected_week}"),
+            value=bool(initial.zero_d_st_positive),
+            key=wk(f"wd_strat_zero_pos_{editor_key}"),
         )
 
         for strategy_name, attr in (
@@ -389,7 +413,7 @@ def _render_discount_strategy_settings(selected_week: str, scope_key: str) -> Di
             ("Moderate", "moderate"),
             ("Strong", "strong"),
         ):
-            table = getattr(defaults, attr)
+            table = getattr(initial, attr)
             with st.expander(strategy_name, expanded=strategy_name == "Moderate"):
                 display_df = pd.DataFrame(strategy_bins_to_display_rows(table))
                 edited_df = st.data_editor(
@@ -397,7 +421,7 @@ def _render_discount_strategy_settings(selected_week: str, scope_key: str) -> Di
                     hide_index=True,
                     use_container_width=True,
                     num_rows="dynamic",
-                    key=wk(f"wd_strat_table_{strategy_name}_{selected_week}"),
+                    key=wk(f"wd_strat_table_{strategy_name}_{editor_key}"),
                     column_config={
                         "lower dSt_QW %": st.column_config.TextColumn("lower dSt_QW %"),
                         "dDiscount %": st.column_config.NumberColumn(
@@ -416,8 +440,12 @@ def _render_discount_strategy_settings(selected_week: str, scope_key: str) -> Di
         st.markdown("**Priority 1 — Default when Discount is missing**")
         missing_discount_raw = st.text_input(
             "Default for missing Discount[current] (n/a = 0)",
-            value="n/a",
-            key=wk(f"wd_strat_missing_discount_{selected_week}"),
+            value=(
+                "n/a"
+                if abs(float(initial.missing_discount_default)) < 1e-12
+                else f"{initial.missing_discount_default * 100:.2f}"
+            ),
+            key=wk(f"wd_strat_missing_discount_{editor_key}"),
             help="Used as Discount[current] when that value is missing (blank/NaN) before applying the strategy.",
         )
         settings.missing_discount_default = _parse_missing_discount_default(missing_discount_raw)
@@ -427,15 +455,15 @@ def _render_discount_strategy_settings(selected_week: str, scope_key: str) -> Di
         settings.sold_zero_strategy = sold_col1.selectbox(
             "Strategy",
             STRATEGY_NAMES,
-            index=STRATEGY_NAMES.index(defaults.sold_zero_strategy),
-            key=wk(f"wd_strat_sold_zero_strat_{selected_week}"),
+            index=_option_index(STRATEGY_NAMES, initial.sold_zero_strategy),
+            key=wk(f"wd_strat_sold_zero_strat_{editor_key}"),
         )
         settings.sold_zero_balance = sold_col2.number_input(
             "Balance (%)",
-            value=defaults.sold_zero_balance * 100.0,
+            value=initial.sold_zero_balance * 100.0,
             step=0.1,
             format="%.2f",
-            key=wk(f"wd_strat_sold_zero_balance_{selected_week}"),
+            key=wk(f"wd_strat_sold_zero_balance_{editor_key}"),
         ) / 100.0
 
         st.markdown("**Priority 3 — Margin to Stock (MtoSt)**")
@@ -446,24 +474,24 @@ def _render_discount_strategy_settings(selected_week: str, scope_key: str) -> Di
         )
         settings.mtost_strategy_enabled = st.toggle(
             "MtoSt strategy",
-            value=defaults.mtost_strategy_enabled,
-            key=wk(f"wd_strat_mtost_enabled_{selected_week}"),
+            value=initial.mtost_strategy_enabled,
+            key=wk(f"wd_strat_mtost_enabled_{editor_key}"),
         )
         settings.mtost_balance = st.number_input(
             "Balance (%)",
-            value=defaults.mtost_balance * 100.0,
+            value=initial.mtost_balance * 100.0,
             step=1.0,
             format="%.2f",
-            key=wk(f"wd_strat_mtost_balance_{selected_week}"),
+            key=wk(f"wd_strat_mtost_balance_{editor_key}"),
             help="Added to MtoSt dDiscount before applying (no multiplicator).",
         ) / 100.0
-        mtost_display_df = pd.DataFrame(mtost_bins_to_display_rows(defaults.mtost))
+        mtost_display_df = pd.DataFrame(mtost_bins_to_display_rows(initial.mtost))
         mtost_edited_df = st.data_editor(
             mtost_display_df,
             hide_index=True,
             use_container_width=True,
             num_rows="dynamic",
-            key=wk(f"wd_strat_mtost_bins_v{DISCOUNT_SETTINGS_UI_VERSION}_{selected_week}"),
+            key=wk(f"wd_strat_mtost_bins_v{DISCOUNT_SETTINGS_UI_VERSION}_{editor_key}"),
             column_config={
                 "lower dMtoSt_QW %": st.column_config.TextColumn("lower dMtoSt_QW %"),
                 "dDiscount %": st.column_config.NumberColumn("dDiscount %", format="%.2f"),
@@ -480,24 +508,24 @@ def _render_discount_strategy_settings(selected_week: str, scope_key: str) -> Di
         settings.margin_mode = st.radio(
             "Margin strategy mode",
             MARGIN_MODES,
-            index=MARGIN_MODES.index(defaults.margin_mode),
+            index=_option_index(MARGIN_MODES, initial.margin_mode),
             horizontal=True,
-            key=wk(f"wd_strat_margin_mode_{selected_week}"),
+            key=wk(f"wd_strat_margin_mode_{editor_key}"),
         )
         settings.default_strategy = st.selectbox(
             "Default strategy",
             STRATEGY_NAMES,
-            index=STRATEGY_NAMES.index(defaults.default_strategy),
-            key=wk(f"wd_strat_default_strat_{selected_week}"),
+            index=_option_index(STRATEGY_NAMES, initial.default_strategy),
+            key=wk(f"wd_strat_default_strat_{editor_key}"),
         )
         if settings.margin_mode == "Margin categories":
             margin_df = st.data_editor(
-                _margin_categories_display_df(defaults),
+                _margin_categories_display_df(initial),
                 hide_index=True,
                 use_container_width=True,
                 num_rows="dynamic",
                 key=(
-                    f"wd_strat_margin_cats_v{DISCOUNT_SETTINGS_UI_VERSION}_{selected_week}"
+                    f"wd_strat_margin_cats_v{DISCOUNT_SETTINGS_UI_VERSION}_{editor_key}"
                 ),
                 column_config={
                     "lower Margin": st.column_config.TextColumn("lower Margin"),
@@ -513,7 +541,12 @@ def _render_discount_strategy_settings(selected_week: str, scope_key: str) -> Di
     return settings
 
 
-def _render_prom_strategy_settings(selected_week: str, scope_key: str) -> PromStrategySettings:
+def _render_prom_strategy_settings(
+    selected_week: str,
+    scope_key: str,
+    initial: PromStrategySettings,
+    editor_id: str,
+) -> PromStrategySettings:
     def wk(widget_key: str) -> str:
         return scoped_widget_key(scope_key, widget_key)
 
@@ -521,8 +554,8 @@ def _render_prom_strategy_settings(selected_week: str, scope_key: str) -> PromSt
         mode = st.selectbox(
             "Prom generation mode",
             PROM_GENERATION_MODES,
-            index=0,
-            key=wk(f"wd_prom_mode_{selected_week}"),
+            index=_option_index(PROM_GENERATION_MODES, initial.mode),
+            key=wk(f"wd_prom_mode_{selected_week}_{editor_id}"),
         )
     return PromStrategySettings(mode=mode)
 
@@ -569,7 +602,7 @@ def _week_discount_edit_column_config(
     config: dict[str, st.column_config.Column] = {}
     editable_new = {NEW_DISCOUNT_COLUMN, NEW_PROM_COLUMN}
     for col in visible_columns:
-        if col == "Basket":
+        if col in ("Basket", "Campaign", "Job"):
             config[col] = st.column_config.TextColumn(col, disabled=True)
         elif col in editable_new:
             config[col] = st.column_config.NumberColumn(
@@ -643,6 +676,7 @@ def _category_week_discount_hist_export_rows(
     include_no_stock: bool,
     full_basket_list: list[str],
     margin_by_basket: dict[str, list[float]] | None = None,
+    planner: dict | None = None,
 ) -> list[dict]:
     """Build discount-history export rows for one built Product BS category."""
     basket_data = analysis.basket_data
@@ -703,6 +737,7 @@ def _category_week_discount_hist_export_rows(
         export_rows,
         week_meta,
         category,
+        assignments=assignment_lookup(planner) if planner else None,
     )
 
 
@@ -716,6 +751,7 @@ def render_week_discount_section(
     discount_hist_df: pd.DataFrame | None = None,
     input_mode: str | None = None,
     margin_by_basket: dict[str, list[float]] | None = None,
+    planner: dict | None = None,
 ) -> None:
     """Render Week Discount toggles, filters, strategy, table, and sum-up metrics."""
     def wk(widget_key: str) -> str:
@@ -748,6 +784,9 @@ def render_week_discount_section(
             progress.empty()
             st.info("No basket rows for the selected week.")
             return
+        week_discount_rows = annotate_week_discount_rows(
+            week_discount_rows, planner or {},
+        )
 
         progress.progress(40, text="Building column metadata…")
         week_discount_meta = build_week_discount_column_meta(
@@ -826,8 +865,81 @@ def render_week_discount_section(
         week_discount_filter_map,
     )
 
-    strategy_settings = _render_discount_strategy_settings(selected_week, scope_key)
-    prom_settings = _render_prom_strategy_settings(selected_week, scope_key)
+    planner_state = planner
+    if planner_state is None:
+        planner_state = {
+            "campaigns": [],
+            "jobs": [],
+            "selected_campaign_id": None,
+            "selected_job_ids": [],
+            "default_discount_settings": {},
+            "default_prom_settings": {},
+        }
+
+    campaign_on = st.toggle(
+        "Campaign",
+        value=False,
+        key=wk("wd_campaign_switch"),
+        help=(
+            "Off: edit and Generate the default pool (baskets with no Job). "
+            "On: edit the Planner selection. Apply saves settings to those Jobs."
+        ),
+    )
+    job_targets = selected_job_targets(planner_state) if campaign_on else []
+    if campaign_on and len(job_targets) == 1:
+        editor_id = f"job_{job_targets[0]['id']}"
+        initial_discount = deserialize_discount_settings(
+            job_targets[0].get("discount_settings")
+        )
+        initial_prom = deserialize_prom_settings(job_targets[0].get("prom_settings"))
+    elif campaign_on and job_targets:
+        editor_id = "jobs_" + "_".join(sorted(str(job["id"]) for job in job_targets))
+        initial_discount = deserialize_discount_settings(
+            job_targets[0].get("discount_settings")
+        )
+        initial_prom = deserialize_prom_settings(job_targets[0].get("prom_settings"))
+        st.caption(
+            f"Editing {len(job_targets)} Jobs. Apply overwrites all of them "
+            "with the settings on this screen."
+        )
+    else:
+        editor_id = "default"
+        initial_discount = (
+            deserialize_discount_settings(planner_state.get("default_discount_settings"))
+            if planner_state.get("default_discount_settings")
+            else _cached_discount_strategy_defaults()
+        )
+        initial_prom = deserialize_prom_settings(
+            planner_state.get("default_prom_settings")
+        )
+        if campaign_on:
+            st.caption("Select a Campaign or Job in Planner to edit its strategy.")
+
+    strategy_settings = _render_discount_strategy_settings(
+        selected_week, scope_key, initial_discount, editor_id,
+    )
+    prom_settings = _render_prom_strategy_settings(
+        selected_week, scope_key, initial_prom, editor_id,
+    )
+    apply_disabled = bool(campaign_on and not job_targets)
+    if st.button(
+        "Apply",
+        key=wk(f"wd_strategy_save_{selected_week}"),
+        help=(
+            "Save the on-screen Discount and Prom settings to the default pool "
+            "or to the selected Campaign/Jobs."
+        ),
+        disabled=apply_disabled,
+        use_container_width=False,
+    ):
+        if campaign_on:
+            n = apply_settings_to_jobs(
+                planner_state, job_targets, strategy_settings, prom_settings,
+            )
+            st.success(f"Saved settings to {n} Job(s).")
+        else:
+            store_default_settings(planner_state, strategy_settings, prom_settings)
+            st.success("Saved default Discount / Prom settings.")
     generated_discount_key = wk(f"wd_generated_discount_{selected_week}")
     generated_prom_key = wk(f"wd_generated_prom_{selected_week}")
     manual_overrides_key = wk(f"wd_manual_overrides_{selected_week}")
@@ -863,37 +975,105 @@ def render_week_discount_section(
     can_manual_edit = _can_manual_edit_new_columns(visible_columns)
 
     _btn_w, _btn_pad = 1, 4
-    gen_disc_col, gen_prom_col, _ = st.columns([_btn_w, _btn_w, _btn_pad - _btn_w])
+    gen_disc_col, gen_prom_col, gen_disc_all_col, gen_prom_all_col, _ = st.columns(
+        [_btn_w, _btn_w, _btn_w, _btn_w, max(_btn_pad - 2 * _btn_w, 1)]
+    )
     generate_discount_clicked = gen_disc_col.button(
         "Generate Discount",
         key=wk(f"wd_generate_discount_{selected_week}"),
-        help="Apply the selected discount strategy to New Discount.",
-        disabled=edit_mode,
+        help=(
+            "Off: unassigned baskets, using the on-screen default settings. "
+            "On: Planner-selected Job baskets, using the on-screen settings."
+        ),
+        disabled=edit_mode or (campaign_on and not job_targets),
         use_container_width=True,
     )
     generate_prom_clicked = gen_prom_col.button(
         "Generate Prom",
         key=wk(f"wd_generate_prom_{selected_week}"),
-        help="Apply the selected prom strategy to New Prom.",
+        help=(
+            "Off: unassigned baskets, using the on-screen default settings. "
+            "On: Planner-selected Job baskets, using the on-screen settings."
+        ),
+        disabled=edit_mode or (campaign_on and not job_targets),
+        use_container_width=True,
+    )
+    generate_discount_all_clicked = gen_disc_all_col.button(
+        "Generate Discount all",
+        key=wk(f"wd_generate_discount_all_{selected_week}"),
+        help="All Jobs (stored settings) plus unassigned baskets (stored default).",
         disabled=edit_mode,
         use_container_width=True,
     )
+    generate_prom_all_clicked = gen_prom_all_col.button(
+        "Generate Prom all",
+        key=wk(f"wd_generate_prom_all_{selected_week}"),
+        help="All Jobs (stored settings) plus unassigned baskets (stored default).",
+        disabled=edit_mode,
+        use_container_width=True,
+    )
+    all_baskets = [
+        str(row.get("Basket", ""))
+        for row in week_discount_rows
+        if str(row.get("Basket", ""))
+    ]
     if generate_discount_clicked:
         progress.progress(80, text="Generating discounts…")
-        ss[generated_discount_key] = generate_week_discount_values(
-            week_discount_rows,
-            week_discount_meta,
-            week_discount_filter_map,
-            strategy_settings,
+        target_ids = target_baskets_for_generate(
+            planner_state,
+            all_baskets,
+            campaign_switch_on=campaign_on,
+            all_jobs=False,
         )
+        generated = dict(ss.get(generated_discount_key) or {})
+        generated.update(
+            generate_week_discount_values(
+                week_discount_rows,
+                week_discount_meta,
+                week_discount_filter_map,
+                strategy_settings,
+                basket_ids=target_ids,
+            )
+        )
+        ss[generated_discount_key] = generated
         progress.empty()
         st.rerun()
     if generate_prom_clicked:
         progress.progress(80, text="Generating promotions…")
-        ss[generated_prom_key] = generate_week_prom_values(
+        target_ids = target_baskets_for_generate(
+            planner_state,
+            all_baskets,
+            campaign_switch_on=campaign_on,
+            all_jobs=False,
+        )
+        generated = dict(ss.get(generated_prom_key) or {})
+        generated.update(
+            generate_week_prom_values(
+                week_discount_rows,
+                week_discount_filter_map,
+                prom_settings,
+                basket_ids=target_ids,
+            )
+        )
+        ss[generated_prom_key] = generated
+        progress.empty()
+        st.rerun()
+    if generate_discount_all_clicked:
+        progress.progress(80, text="Generating discounts for all Jobs…")
+        ss[generated_discount_key] = generate_discount_all_jobs(
+            week_discount_rows,
+            week_discount_meta,
+            week_discount_filter_map,
+            planner_state,
+        )
+        progress.empty()
+        st.rerun()
+    if generate_prom_all_clicked:
+        progress.progress(80, text="Generating promotions for all Jobs…")
+        ss[generated_prom_key] = generate_prom_all_jobs(
             week_discount_rows,
             week_discount_filter_map,
-            prom_settings,
+            planner_state,
         )
         progress.empty()
         st.rerun()
@@ -1110,6 +1290,7 @@ def render_week_discount_section(
                 export_rows,
                 next_week_meta,
                 discount_hist_category,
+                assignments=assignment_lookup(planner_state),
             )
             hist_export_rows = merge_discount_hist_export(
                 discount_hist_df,
@@ -1163,6 +1344,7 @@ def render_week_discount_section(
                         include_no_stock=include_no_stock,
                         full_basket_list=full_basket_list,
                         margin_by_basket=cat_scope.get("basket_margin_hybrid"),
+                        planner=cat_scope.get("planner"),
                     )
                     if cat_hist:
                         category_rows[category] = cat_hist

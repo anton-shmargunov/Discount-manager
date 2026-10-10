@@ -2,7 +2,7 @@
 
 **Pricing Correlation & Bucket Analysis · Phase 1 Streamlit MVP**
 
-Version 1.0.1.t1 · Last updated 2026-10-08
+Version 1.0.2.t1 · Last updated 2026-10-10
 
 ---
 

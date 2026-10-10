@@ -28,7 +28,7 @@ Streamlit port of **Pricing Correlation & Bucket Analysis (PBA)**. Layers are ke
   - **The user asked to leave `main` alone.** It is at `8ae451c`. Deploy = push `v1-1-test_1`.
 - **Local env:** Python 3.9.13, Streamlit 1.49.1, pandas 2.3, numpy 2.0.2.
 - **Cloud env:** Python 3.12 with a newer Streamlit.
-- **Version:** `configs/settings.py` → `APP_VERSION = "1.0.1.t1"`. The user set this; the app page shows "Version …".
+- **Version:** `configs/settings.py` → `APP_VERSION = "1.0.2.t1"` (bumped 2026-10-10). The user set this; the app page shows "Version …".
 
 Project root: `d:\Anton\UTires\Code\Pricing\Pricing Correlation and Bucket Analysis\streamlit\PBA.v.1.250525\`
 

@@ -37,35 +37,13 @@ _SKIP_KEY_PREFIXES = (
     "UploadFile",
 )
 
-# Streamlit forbids assigning session_state for button / download_button keys.
-# Fragments match keys used across pages/ and ui/.
-_WRITE_DISALLOWED_KEY_FRAGMENTS = (
-    "generate_discount",
-    "generate_prom",
-    "manual_apply",
-    "manual_cancel",
-    "manual_edit_btn",
-    "run_model",
-    "run_sumup_margin",
-    "btn_cost",
-    "btn_plane",
-    "btn_line",
-    "week_discount_export",
-    "week_discount_hist_export",
-    "week_detail_export",
-    "export_total",
-    "tb_raw",
-    "open_save_dialog",
-    "restore_btn",
-    "dialog_download",
-    "planner_add_campaign",
-    "planner_delete_campaign",
-    "planner_add_job",
-    "planner_delete_job",
-    "planner_update_job",
-    "planner_set_job_from_group",
-    "wd_strategy_save",
-)
+# Login state: never written to a project file and never set by a restore.
+_NEVER_PERSIST_PREFIXES = ("_auth_",)
+
+# Streamlit forbids assigning session_state for button / download_button /
+# form_submit_button keys. Every such key must end with this suffix; the
+# naming test in tests/test_e2e.py enforces it for pages/ and ui/.
+BUTTON_KEY_SUFFIX = "_btn"
 
 
 def ensure_project_filename(name: str) -> str:
@@ -87,13 +65,7 @@ def _is_write_disallowed_widget_key(key: str) -> bool:
         return True
     if any(key.startswith(prefix) for prefix in _SKIP_KEY_PREFIXES):
         return True
-    # Auto-generated or explicit button keys often include "::btn_" / "_btn_".
-    if "::btn_" in key or key.startswith("btn_") or "_btn_" in key:
-        return True
-    if key.endswith("_btn"):
-        return True
-    lowered = key.lower()
-    return any(fragment in lowered for fragment in _WRITE_DISALLOWED_KEY_FRAGMENTS)
+    return key.endswith(BUTTON_KEY_SUFFIX)
 
 
 class UnavailableWidgetState(dict):
@@ -199,7 +171,7 @@ def collect_ui_session_state(session_state: Any) -> dict[str, Any]:
     ui: dict[str, Any] = {}
     for key in list(session_state.keys()):
         key_str = str(key)
-        if _is_write_disallowed_widget_key(key_str):
+        if _is_write_disallowed_widget_key(key_str) or key_str.startswith(_NEVER_PERSIST_PREFIXES):
             continue
         try:
             value = session_state[key]
@@ -313,7 +285,7 @@ def apply_project_payload(session_state: Any, payload: dict[str, Any]) -> list[s
     restored_keys = 0
     for key, value in ui.items():
         key_str = str(key)
-        if _is_write_disallowed_widget_key(key_str):
+        if _is_write_disallowed_widget_key(key_str) or key_str.startswith(_NEVER_PERSIST_PREFIXES):
             continue
         if _is_streamlit_widget_state(value):
             continue

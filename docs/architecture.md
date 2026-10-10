@@ -2,7 +2,7 @@
 
 **Pricing Correlation & Bucket Analysis · Phase 1 Streamlit MVP**
 
-Version 1.0.0 · Last updated 2026-09-12
+Version 1.0.1.t1 · Last updated 2026-10-08
 
 ---
 
@@ -36,22 +36,31 @@ PBA.v.1.250525/
 ├── app.py                          # Thin entry: page config, theme, welcome screen
 │
 ├── pages/
-│   └── 01_Correlation_Analysis.py  # Main analysis page (~2250 lines)
+│   └── 01_Correlation_Analysis.py  # Main analysis page (~3600 lines)
 │
 ├── ui/                             # Reusable Streamlit sections (no analytics)
 │   ├── product_bs_scope.py         # Per-mode/category session isolation
 │   ├── week_discount_ui.py         # Week Discount UI (strategy, table, exports)
+│   ├── planner_ui.py               # Sidebar Planner (Campaign / Job) + conflict dialog
+│   ├── auth_gate.py                # Login / password gate (require_login)
 │   └── project_save_ui.py          # Sidebar Project save / restore (.disc_proj)
 │
 ├── core/                           # Pure analytical engine
 │   ├── models.py                   # Dataclasses: BasketTimeSeries, BasketResult, …
 │   ├── persistence/
 │   │   └── project_io.py           # .disc_proj pack / unpack / apply (no Streamlit)
+│   ├── security/
+│   │   └── passwords.py            # PBKDF2 hash / verify, login throttle
 │   ├── analytics/
 │   │   ├── basket_analysis.py      # run_*_analysis, clustering hooks, sum-up
 │   │   ├── week_basket_tables.py   # Week Discount rows, filters, deltas, export
 │   │   ├── discount_strategy.py    # Strategy bins, generation, manual overrides
-│   │   └── prom_strategy.py        # Prom generation ("Set previous prom")
+│   │   ├── prom_strategy.py        # Prom generation ("Set previous prom")
+│   │   ├── planner.py              # Campaign / Job model, assignment, generate-all
+│   │   ├── cost_correction.py      # Cost Corrected / Margin Corrected series
+│   │   ├── selected_basket_margin.py  # Margin Corrected for multi-basket detail
+│   │   ├── selected_basket_weeks.py   # Weekly Sum-Up of a basket selection
+│   │   └── weighted_discount.py    # Stock / CountProduct / Sold weighted Discount, Prom
 │   ├── transforms/
 │   │   └── data_prep.py            # ETL, product-BS parsing, discount hist I/O
 │   ├── statistics/
@@ -63,12 +72,15 @@ PBA.v.1.250525/
 │   ├── modeling/
 │   │   └── regression.py           # MLR plane, SLR line, PCA fit
 │   └── optimization/
-│       └── price_optimization.py   # Margin model Price_max(Stock)
+│       ├── price_optimization.py   # Margin model Price_max(Stock)
+│       └── margin_model_eval.py    # Margin-model error metrics + target point
 │
 ├── visualizations/                 # Plotly chart builders (no Streamlit)
 │   ├── cluster_charts.py
 │   ├── detail_charts.py
-│   └── sumup_charts.py
+│   ├── progress_stack.py           # Vertical-stack progress figures
+│   ├── sumup_charts.py
+│   └── sumup_qw_charts.py          # Sum-up charts with quadweek colour / QW average
 │
 ├── configs/
 │   ├── settings.py                 # App constants, paths, cluster colors
@@ -77,12 +89,15 @@ PBA.v.1.250525/
 │       └── strategies.v1.csv       # Discount strategy defaults (prom reserved)
 │
 ├── inputs/                         # Sample CSVs and canonical basket list (625)
+├── scripts/
+│   └── hash_password.py            # Prints a secrets.toml entry for one user
 ├── tests/
 │   └── test_e2e.py                 # End-to-end smoke tests
 ├── docs/
 │   ├── architecture.md             # This file
 │   └── user-manual.md
 │
+├── CHANGELOG.md                    # Main updates by version
 ├── requirements.txt
 ├── .streamlit/config.toml
 └── handoff_*.md                    # Developer handoff notes (not user docs)
@@ -131,9 +146,9 @@ Main workflow page, numbered sections:
 | ② Preprocessing | Range filters, K, Product BS Category |
 | Build / K-Means / Octants | Trigger `core` analysis |
 | ③ Correlation Clusters | Cluster overview table + 3D scatter |
-| ④ Detailed Basket Breakdown | Sortable basket table; row click → drill-down |
+| ④ Detailed Basket Breakdown | Sortable basket table; row click → drill-down; Group / Multiselect; **Set a Job** |
 | ⑤ Basket Detail | Week Progress charts, fits, margin model |
-| ⑥ Sum-Up | Weekly aggregates, correlation KPIs, week selector |
+| ⑥ Sum-Up | Weekly aggregates, correlation KPIs, week selector, margin model |
 | Per-week expanders | Weekly Detail, **Week Discount**, Week Visualization |
 
 Extracted UI modules:
@@ -141,6 +156,9 @@ Extracted UI modules:
 - `render_week_discount_section()` from `ui/week_discount_ui.py`
 - Scope helpers from `ui/product_bs_scope.py` (`PRODUCT_BS_CATEGORY_OPTIONS`, `iter_built_product_bs_scopes`)
 - `render_sidebar_project_panel()` / `apply_pending_project_restore()` from `ui/project_save_ui.py`
+- `render_sidebar_planner_panel()` from `ui/planner_ui.py`
+
+**Basket Detail selection priority** (first match wins): Group → Select All → table rows → Planner focus. Planner focus is the selected Jobs or, when no Job is selected, every basket of the selected Campaign. A single-basket Basket Detail therefore needs the Planner Campaign set to **Select…**.
 
 ---
 
@@ -203,8 +221,13 @@ Defined in `ui/product_bs_scope.py`:
 | `analysis` | `AnalysisResult` after build |
 | `selected_basket`, `selected_week` | Drill-down selections |
 | `fit_sold`, `fit_cost`, `margin_model`, … | Per-basket and Sum-Up fits |
+| `fit_sold_indices[basket]`, `fit_sumup_stock_sold_indices` | Weeks used by the last **Fit Plane** (margin-model metrics reuse them) |
+| `margin_model[basket]`, `sumup_margin_model` | Saved model: `result`, `target` (point evaluation), `metrics` (Adj R², RMSE, MAPE) |
+| `planner` | Campaign / Job planner (see [Campaign / Job Planner](#campaign--job-planner)) |
 | `discount_hist_df` | Copy of uploaded discount history at build time |
 | Week Discount keys (scoped) | `wd_generated_discount_{week}`, `wd_manual_overrides_{week}`, … |
+
+`clear_product_bs_scope_derived()` resets selections, fits, fit-week indices and margin models on **Build Project**. The Planner is kept.
 
 Global (unscoped): `input_mode`, filter text inputs, sidebar log (`log_messages`).
 
@@ -241,6 +264,28 @@ The discount-history uploader accepts **multiple files**. At Build they are aggr
 
 ---
 
+## Campaign / Job Planner
+
+Model and rules live in `core/analytics/planner.py` (no Streamlit). The sidebar panel and the conflict dialog live in `ui/planner_ui.py`.
+
+- **Storage:** `scope["planner"]`, a plain dict, so it is saved in `.disc_proj`. Older planners are migrated through `settings_version` (currently 2).
+- **Hierarchy:** Campaign → Jobs. IDs are 10 digits (`new_planner_id`).
+- **Exclusive membership:** a basket belongs to at most one Job; a Job belongs to one Campaign.
+- **Strategies:** each Job stores its own serialized Discount and Prom settings. Baskets with no Job use the planner's default settings, seeded from `configs/strategies/strategies.v1.csv`.
+
+| Action | Where | Function |
+|--------|-------|----------|
+| Create / rename / delete Campaign or Job | Sidebar **Planner** | `add_*`, `rename_*`, `delete_*` |
+| **Update** the selected Job to the current table selection | Sidebar **Planner** | `find_assignment_conflicts`, `apply_job_assignment` |
+| **Set a Job** from the current Group | ④ Combination expander | same, with a new Job |
+| **Apply** on-screen strategy settings | Week Discount | `store_default_settings` (Campaign switch off) / `apply_settings_to_jobs` (on) |
+
+Assigning a basket that already belongs to another Job opens a per-basket **conflict dialog** (`st.dialog` + `data_editor`: Approve all / Keep all / Confirm / Cancel). Only approved baskets move.
+
+`assignment_lookup()` feeds the **Campaign** and **Job** columns of the Detailed Basket Breakdown and Week Discount tables, and the discount-history export.
+
+---
+
 ## Week Discount pipeline
 
 End-to-end flow for a selected week:
@@ -262,6 +307,16 @@ UI: styled dataframe or data_editor
 ```
 
 Orchestrated by `build_working_week_discount_rows()` in `discount_strategy.py`.
+
+### Generation buttons and the Planner
+
+| Button | Baskets | Settings | Existing generated values |
+|--------|---------|----------|---------------------------|
+| **Generate Discount / Prom**, Campaign switch off | Unassigned baskets | On-screen | Merged |
+| **Generate Discount / Prom**, Campaign switch on | Baskets of the Planner-selected Jobs | On-screen | Merged |
+| **Generate Discount all / Prom all** | Every Job, plus unassigned baskets | Each Job's stored settings; stored default for unassigned | Replaced |
+
+Target selection: `target_baskets_for_generate()`. Generate-all: `generate_discount_all_jobs()` / `generate_prom_all_jobs()`.
 
 ### Delta rules (`week_basket_tables.py`)
 
@@ -303,6 +358,8 @@ UI lives in the Week Discount **Export** expander. Buttons are disabled while Ed
 | **Discount history. Current** | `build_discount_hist_export_rows`, `advance_discount_hist_week_metadata`, `merge_discount_hist_export` | Current Product BS category (report mode: Aggregated) |
 | **Discount history. All** | `iter_built_product_bs_scopes` + `combine_discount_hist_export_by_category` | product_BS modes only; every **built** category in this session |
 
+Discount-history exports end with four Planner columns: `campaign_id`, `campaign_name`, `job_id`, `job_name`.
+
 **Discount history. All** is omitted in report mode. It only includes categories that have been **Built** (and generated/edited) this session — switching category and building each one is required.
 
 Checkboxes: **Include 'no stock'** (canonical 625-basket list) and **all history** (merge uploaded hist + new week; last duplicate `(basket, year_week)` wins).
@@ -310,6 +367,39 @@ Checkboxes: **Include 'no stock'** (canonical 625-basket list) and **all history
 A progress bar (`st.progress`) runs while Week Discount rows are computed, generated, applied, and rendered; it is cleared before the Export expander.
 
 Canonical basket universe: `inputs/full list of baskets.csv` (625 baskets, 5⁴ codes).
+
+---
+
+## Access control
+
+The Correlation Analysis page calls `require_login()` (`ui/auth_gate.py`) right after `set_page_config` / theme, before any session init, restore or sidebar. Until a user signs in, the script ends with `st.stop()`. The check is in the page itself because Streamlit pages can be opened directly by URL. The home page (`app.py`) stays public; it shows no data.
+
+**Users** are stored in the app secrets (`.streamlit/secrets.toml` locally, which is gitignored; **Settings → Secrets** on Streamlit Cloud):
+
+```toml
+[app_users.anton]
+password_hash = "pbkdf2_sha256$600000$<salt_hex>$<hash_hex>"
+name = "Anton"   # optional
+```
+
+Create an entry with `python scripts/hash_password.py`; it reads the password without echoing it. Only hashes are stored, never plain passwords. The `[auth]` section name is reserved for Streamlit's `st.login()`, which is why users live under `[app_users]`.
+
+| Safeguard | Implementation |
+|-----------|----------------|
+| Password storage | PBKDF2-HMAC-SHA256, 600 000 iterations, 16-byte random salt (stdlib `hashlib`) |
+| Comparison | `hmac.compare_digest`; unknown logins verify against a dummy hash, so timing does not reveal which logins exist |
+| Brute force | `LoginThrottle`: 5 failures in 15 min lock that login for 5 min (per server process), plus a 1 s delay on each failure |
+| Fail closed | No `[app_users]` configured → page locked with an "Access is not configured" message |
+| Revocation | A user removed from secrets is signed out on their next interaction |
+| Session scope | Login lives in `session_state` only (no cookie). Refresh or a new tab means signing in again. **Log out** clears the whole session |
+| Project files | `_auth_*` keys are never written to `.disc_proj` and never set by a restore |
+
+**Alternatives considered:**
+- **`st.login()` (OIDC)** with Google / Microsoft / Auth0: stronger (MFA, central user management), but needs an identity-provider client and isn't login/password.
+- **Streamlit Community Cloud private app**: viewer allowlist by email, enforced by the platform. Only one private app per workspace, and the repo must be private.
+- **`streamlit-authenticator`**: bcrypt plus a 30-day JWT cookie. It's third-party and pulls in several dependencies; a cookie only adds convenience.
+
+**Security note:** `.disc_proj` files are pickles. Loading a crafted file can run code on the server, so only Restore files you created. Restore is only reachable after sign-in.
 
 ---
 
@@ -322,15 +412,38 @@ Sidebar expander **Project** (above **Log**). Format: magic `PBA1DISC` + gzip pi
 | **Save…** | Dialog for filename → download snapshot |
 | **Restore** | File uploader (`type=["disc_proj"]`) then **Restore** |
 
-Payload: `format`, `version`, `saved_at`, `ui` (picklable session keys), `scopes` (`_pbs_scopes` including `analysis`), `log_messages`.
+Payload: `format`, `version`, `saved_at`, `ui` (picklable session keys), `scopes` (`_pbs_scopes` including `analysis`, `discount_hist_df` and `planner`), `log_messages`.
+
+Restore does **not** need the report or discount-history CSVs: the built `AnalysisResult` (with discount/prom already merged), `discount_hist_df`, the Planner and the UI settings are all in the file. Only **Build** reads the uploaders.
 
 **Not saved / not restored:**
 
 - Original CSV uploads (`fu_*` keys, `UploadedFile` objects)
-- Streamlit **button** and **download_button** keys (assignment is forbidden; fragments such as `generate_discount`, `week_discount_export`, `::btn_`)
+- Streamlit **button**, **download_button** and **form_submit_button** keys (session assignment is forbidden)
+- Streamlit widget-state objects (`data_editor` / `dataframe` selection states), detected by type
 - Project-panel widget keys (`_project_*`)
 
-Restore applies **before** widgets render (`apply_pending_project_restore()`). After restore, analysis comes from the saved scope snapshot — re-upload of CSVs is not required. Widget-key cleanup must **not** delete `_pbs_scopes`. Browser **Save As / fixed download folder** is not available in Streamlit Cloud; a desktop wrapper would be needed for a true disk path.
+### Widget key naming rule
+
+Streamlit raises `StreamlitValueAssignmentNotAllowedError` if a restored session value has the key of a button-type widget or a file uploader. `project_io` skips these keys by name:
+
+| Widget | Key rule | Example |
+|--------|----------|---------|
+| `st.button`, `st.download_button`, `st.form_submit_button` | Ends with **`_btn`** (`BUTTON_KEY_SUFFIX`) | `wk(f"wd_generate_discount_{week}_btn")` |
+| `st.file_uploader` | Starts with **`fu_`** (or `_project_`), unscoped | `"fu_discount_hist"` |
+
+Scoped keys (`scope::name`) keep the suffix, so `wk()` / `sk()` are fine for buttons. Unkeyed buttons are safe: Streamlit stores them under internal IDs that are never saved. `tests/test_e2e.py` (`_button_key_naming_violations`) parses `pages/` and `ui/` and fails on any keyed button or uploader that breaks the rule.
+
+### Cross-version loading
+
+Cloud and local run different Streamlit and NumPy versions. `_ProjectUnpickler` therefore:
+
+- returns `UnavailableWidgetState` (a dict stand-in that is never restored) for **any** `streamlit.*` class;
+- maps `numpy.core` ↔ `numpy._core`.
+
+On save, pyarrow string columns of `discount_hist_df` are converted to `object`. Read errors include the underlying exception text.
+
+Restore applies **before** widgets render (`apply_pending_project_restore()`). Widget-key cleanup must **not** delete `_pbs_scopes`. Browser **Save As / fixed download folder** is not available in Streamlit Cloud; a desktop wrapper would be needed for a true disk path.
 
 ---
 
@@ -382,9 +495,23 @@ Week Discount column metadata, row builders, filters, weighted comparison, summa
 
 Analytical `Price_max(Stock)` from combined sold + cost fits; used in basket and Sum-Up margin model UI.
 
+### `core/optimization/margin_model_eval.py`
+
+Diagnostics for the same analytical model, `M(P, S) = (P·(1 − a_cost) − z0_cost) · Sold(P, S)`:
+
+| Function | Purpose |
+|----------|---------|
+| `compute_margin_fit_metrics` | Adj R² (p = 2), RMSE, MAPE of model M vs actual M over given week indices (the Sold plane fit weeks) |
+| `evaluate_margin_target` | Model at the actual point vs a target point (default: Price_max at actual stock). Returns Sold (model), Price_diff, M gain, Sold gain and a plain-`bool` `is_manual` |
+| `compute_model_sold`, `price_max_or_fallback` | Helpers for the manual Price / Stock inputs |
+
+Basket Detail passes the plotted margin, which is the hybrid series when **Margin Corrected** is on.
+
 ### `visualizations/`
 
 Plotly figure builders consumed by the main page. No Streamlit imports; figures passed to `st.plotly_chart()`.
+
+`sumup_qw_charts.py` holds the Sum-up variants driven by the **Line + Symbol**, **Colour by Quadweek** and **QW Average** toggles (`build_sumup_3panel_qw`, `build_sumup_3d_qw`, `build_combined_progress_qw`, `build_vertical_stack_from_specs_qw`, …). The "Separate plots" view uses `build_metric_progress(quadweeks=…, use_qw_colors=…, show_qw_average=…)`.
 
 ---
 
@@ -415,9 +542,15 @@ python tests/test_e2e.py
 - Prom strategy, full-basket export (625), scope isolation
 - Strategies v1 loading
 - Multi-file discount hist merge, all-category export combine
-- `.disc_proj` round-trip; button / `fu_*` keys skipped on restore
+- `.disc_proj` round-trip; `_btn` / `fu_*` keys skipped on restore; missing or live Streamlit classes; pyarrow → object
+- Button / uploader key naming rule across `pages/` and `ui/`
+- Planner: membership, conflicts, generate-all; discount-history Planner columns
+- Margin-model metrics and manual target point
+- Password hashing / verification, login throttle, `_auth_*` keys excluded from `.disc_proj`
 
-**Not covered:** Streamlit widget integration, browser UX, Cloud deployment runtime, Project Restore of very large sessions in the browser.
+pytest is not installed; the file runs as a script. Compile check: `python -m py_compile <file>`.
+
+**Not covered:** Streamlit widget integration, browser UX, Cloud deployment runtime, Project Restore of very large sessions in the browser. Real-data UI checks were run ad hoc with `streamlit.testing.v1.AppTest` (set `PYTHONIOENCODING=utf-8` on Windows).
 
 ---
 
@@ -428,10 +561,13 @@ python tests/test_e2e.py
 | Local | `streamlit run app.py --server.port 8501` |
 | Streamlit Cloud | https://discount-manager-v1-1.streamlit.app/ |
 | GitHub | https://github.com/anton-shmargunov/Discount-manager |
-| Python | 3.11+ locally; **3.12** recommended on Cloud |
-| Secrets | Empty for MVP (sample data in `inputs/`) |
+| Python | 3.9+ locally (tested on 3.9.13); **3.12** on Cloud |
+| Streamlit | `>=1.49` (needs `width="stretch"` on buttons, `dataframe`, `data_editor`) |
+| Secrets | `[app_users]` login entries (see [Access control](#access-control)). Add them on Cloud **before** pushing, or the page is locked |
 
-Push to `main` triggers Cloud redeploy (~1 minute).
+Each Cloud app redeploys (~1 minute) when its branch is pushed: the main app from `main`, the test app from `v1-1-test_1`.
+
+Layout widths use `width="stretch"`; `use_container_width` is deprecated and must not be reintroduced. `st.plotly_chart` gets no width argument: it stretches by default in both 1.49 and newer releases.
 
 ---
 
@@ -461,7 +597,10 @@ UI extraction continues incrementally (`ui/week_discount_ui.py` is the pattern f
 |------|--------|
 | Streamlit `data_editor` | Do not assign widget key in `session_state` before render; no preview DataFrame feedback in edit mode |
 | Session-only state | Generated/manual discount values lost on browser refresh unless saved as `.disc_proj` |
-| Project restore + widgets | Never restore button/`download_button` keys; uploads are not re-attached. Cleanup must preserve `_pbs_scopes`. |
+| Project restore + widgets | Button keys must end with `_btn`, uploader keys start with `fu_` (see [Widget key naming rule](#widget-key-naming-rule)); uploads are not re-attached. Cleanup must preserve `_pbs_scopes`. |
+| Cloud stale modules | Streamlit Cloud can serve old copies of existing modules. Put new public names in **new modules** and do not add kwargs to builders that pages already call. |
+| Margin model on weak fits | If the Sold slope vs Price is positive, the stationary point is a margin **minimum** and M surplus is negative. Real-data fits are weak (Adj R² often < 0.4). |
+| Planner focus | A selected Campaign with no Job puts the whole Campaign in focus and overrides single-basket Basket Detail |
 | Scope switch | Rebuild after changing input mode or category |
 | Discount hist export | `all history` merge requires upload at Build; **Discount history. All** only includes **built** categories |
 | Download folder | Browser-controlled; app cannot set Save As path |
@@ -474,6 +613,8 @@ UI extraction continues incrementally (`ui/week_discount_ui.py` is the pattern f
 
 - [user-manual.md](user-manual.md) — operator guide
 - [README.md](../README.md) — quick start
-- `handoff_260912.md` — latest developer handoff (Project save, all-BS export)
+- [CHANGELOG.md](../CHANGELOG.md) — main updates by version
+- `handoff_261008.md` — latest developer handoff (Planner, Cloud restore, margin-model table, Sum-up toggles)
+- `handoff_260912.md` — Project save, all-BS export
 - `handoff_260623.md` — Week Discount edit/export, Cloud deploy
 - `PBA. Arch. Spec. Phase 1.txt` — original specification

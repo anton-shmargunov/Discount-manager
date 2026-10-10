@@ -51,8 +51,8 @@ def _save_project_dialog() -> None:
         file_name=filename,
         mime="application/octet-stream",
         type="primary",
-        use_container_width=True,
-        key="_project_dialog_download",
+        width="stretch",
+        key="_project_dialog_download_btn",
         help="Downloads the current session as a .disc_proj file.",
     )
 
@@ -66,8 +66,8 @@ def render_sidebar_project_panel() -> None:
         )
         if st.button(
             "Save…",
-            use_container_width=True,
-            key="_project_open_save_dialog",
+            width="stretch",
+            key="_project_open_save_dialog_btn",
             help="Open a dialog to name and download a .disc_proj file.",
         ):
             _save_project_dialog()
@@ -82,7 +82,7 @@ def render_sidebar_project_panel() -> None:
         )
         restore_clicked = st.button(
             "Restore",
-            use_container_width=True,
+            width="stretch",
             type="primary",
             disabled=uploaded is None,
             key="_project_restore_btn",

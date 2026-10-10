@@ -40,6 +40,66 @@ from core.transforms.data_prep import (
 from visualizations.sumup_charts import build_metric_progress
 
 
+_BUTTON_WIDGETS = {"button", "download_button", "form_submit_button"}
+_KEY_WRAPPERS = {"wk", "sk", "scoped_widget_key"}
+
+
+def _key_edge_text(node, last: bool):
+    """Literal text at the end (or start) of a widget key expression, or None.
+
+    Scoping wrappers only preserve the end of a key, so they are unwrapped
+    for suffix checks only.
+    """
+    import ast
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr) and node.values:
+        part = node.values[-1] if last else node.values[0]
+        if isinstance(part, ast.Constant) and isinstance(part.value, str):
+            return part.value
+        return None
+    if (
+        last
+        and isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in _KEY_WRAPPERS
+        and node.args
+    ):
+        return _key_edge_text(node.args[-1], last)
+    return None
+
+
+def _button_key_naming_violations() -> list[str]:
+    """Keyed buttons must end with '_btn'; keyed file uploaders must start with 'fu_' or '_project_'."""
+    import ast
+    from pathlib import Path
+
+    violations: list[str] = []
+    for folder in ("pages", "ui"):
+        for path in sorted(Path(folder).glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                    continue
+                widget = node.func.attr
+                if widget not in _BUTTON_WIDGETS and widget != "file_uploader":
+                    continue
+                key_node = next((kw.value for kw in node.keywords if kw.arg == "key"), None)
+                if key_node is None:
+                    continue
+                where = f"{path}:{node.lineno} ({widget})"
+                if widget in _BUTTON_WIDGETS:
+                    tail = _key_edge_text(key_node, last=True)
+                    if tail is None or not tail.endswith("_btn"):
+                        violations.append(where)
+                else:
+                    head = _key_edge_text(key_node, last=False)
+                    if head is None or not head.startswith(("fu_", "_project_")):
+                        violations.append(where)
+    return violations
+
+
 def main():
     print("Loading input files...")
     df_sold  = pd.read_csv("inputs/SoldQty_tot.csv")
@@ -1485,8 +1545,8 @@ def main():
     fake.input_mode = "TrackingBaskets_v2 - product_BS. on date of sale"
     fake.fi_k = 3
     fake.fu_tracking_report = object()  # should be skipped by type/prefix
-    fake["pbs::scope::week_discount_export_w"] = True
-    fake["pbs::scope::generate_discount"] = True
+    fake["pbs::scope::week_discount_export_w_btn"] = True
+    fake["pbs::scope::wd_generate_discount_2026-39_btn"] = True
     fake._pbs_scopes = {
         "pbs::TrackingBaskets_v2 - product_BS. on date of sale::Aggregated": {
             "analysis": result,
@@ -1519,18 +1579,18 @@ def main():
     assert restored_payload["ui"]["fi_k"] == 3
     assert "fu_tracking_report" not in restored_payload["ui"]
     assert "_pbs_scopes" not in restored_payload["ui"]
-    assert "pbs::scope::week_discount_export_w" not in restored_payload["ui"]
-    assert "pbs::scope::generate_discount" not in restored_payload["ui"]
+    assert "pbs::scope::week_discount_export_w_btn" not in restored_payload["ui"]
+    assert "pbs::scope::wd_generate_discount_2026-39_btn" not in restored_payload["ui"]
 
     dest = _FakeSession()
     dest.log_messages = ["old"]
-    dest["pbs::scope::manual_edit_btn"] = True
+    dest["pbs::scope::wd_manual_edit_2026-39_btn"] = True
     messages = apply_project_payload(dest, restored_payload)
     assert dest.fi_k == 3
     assert dest.input_mode == fake.input_mode
     assert dest._pbs_scopes["pbs::TrackingBaskets_v2 - product_BS. on date of sale::Aggregated"]["selected_basket"] == "1111"
     assert dest._pbs_scopes["pbs::TrackingBaskets_v2 - product_BS. on date of sale::Aggregated"]["analysis"].basket_count == result.basket_count
-    assert "pbs::scope::manual_edit_btn" not in dest
+    assert "pbs::scope::wd_manual_edit_2026-39_btn" not in dest
     assert any("restored" in line.lower() for line in messages)
     print(f"  Project bytes: {len(blob):,}")
 
@@ -1590,13 +1650,13 @@ def main():
         delattr(data_editor_mod, "LiveEditorState")
 
     button_keys = [
-        "pbs::scope::planner_add_campaign",
-        "pbs::scope::planner_delete_campaign",
-        "pbs::scope::planner_add_job",
-        "pbs::scope::planner_delete_job",
-        "pbs::scope::planner_update_job",
-        "pbs::scope::planner_set_job_from_group",
-        "pbs::scope::wd_strategy_save_2026-39",
+        "pbs::scope::planner_add_campaign_btn",
+        "pbs::scope::planner_delete_campaign_btn",
+        "pbs::scope::planner_add_job_btn",
+        "pbs::scope::planner_delete_job_btn",
+        "pbs::scope::planner_update_job_btn",
+        "pbs::scope::planner_set_job_from_group_btn",
+        "pbs::scope::wd_strategy_save_2026-39_btn",
     ]
     button_payload = dict(payload)
     button_payload["ui"] = {**payload["ui"], **{key: False for key in button_keys}}
@@ -1604,6 +1664,9 @@ def main():
     button_dest.log_messages = []
     apply_project_payload(button_dest, button_payload)
     assert not any(key in button_dest for key in button_keys)
+
+    violations = _button_key_naming_violations()
+    assert not violations, "Button keys must end with '_btn':\n" + "\n".join(violations)
 
     editor_session = _FakeSession()
     editor_session.log_messages = ["Ready."]
@@ -1618,6 +1681,99 @@ def main():
         "pbs::TrackingBaskets_v2 - product_BS. on date of sale::Aggregated"
     ]["discount_hist_df"]
     assert str(packed_hist["year_week"].dtype) == "object"
+
+    auth_session = _FakeSession()
+    auth_session.log_messages = ["Ready."]
+    auth_session["_auth_user"] = "anton"
+    auth_session["fi_k"] = 4
+    auth_payload = build_project_payload(auth_session)
+    assert "_auth_user" not in auth_payload["ui"]
+    forged_payload = dict(auth_payload)
+    forged_payload["ui"] = {**auth_payload["ui"], "_auth_user": "intruder"}
+    auth_dest = _FakeSession()
+    auth_dest.log_messages = []
+    auth_dest["_auth_user"] = "anton"
+    apply_project_payload(auth_dest, forged_payload)
+    assert auth_dest["_auth_user"] == "anton"
+
+    print("\nLogin password hashing and throttling...")
+    from core.security.passwords import (
+        LoginThrottle,
+        authenticate,
+        hash_password,
+        verify_password,
+    )
+
+    pw_hash = hash_password("correct horse", iterations=100_000)
+    assert pw_hash.startswith("pbkdf2_sha256$100000$")
+    assert hash_password("correct horse", iterations=100_000) != pw_hash
+    assert verify_password("correct horse", pw_hash)
+    assert not verify_password("wrong horse", pw_hash)
+    assert not verify_password("correct horse", "not-a-hash")
+    assert not verify_password("correct horse", pw_hash.replace("$100000$", "$1000$"))
+    assert authenticate(" Anton ", "correct horse", {"anton": pw_hash}) == "anton"
+    assert authenticate("anton", "wrong", {"anton": pw_hash}) is None
+    assert authenticate("ghost", "correct horse", {"anton": pw_hash}) is None
+
+    fake_now = [0.0]
+    throttle = LoginThrottle(
+        max_failures=3, window_seconds=60, lockout_seconds=30, clock=lambda: fake_now[0]
+    )
+    for _ in range(2):
+        throttle.record_failure("Anton")
+    assert throttle.seconds_locked("anton") == 0.0
+    throttle.record_failure("anton")
+    assert throttle.seconds_locked("ANTON") == 30.0
+    assert throttle.seconds_locked("other") == 0.0
+    fake_now[0] = 31.0
+    assert throttle.seconds_locked("anton") == 0.0
+    throttle.record_failure("anton")
+    throttle.record_success("anton")
+    throttle.record_failure("anton")
+    throttle.record_failure("anton")
+    assert throttle.seconds_locked("anton") == 0.0
+
+    print("\nMargin model metrics and manual point...")
+    from core.models import Linefit, Planefit
+    from core.optimization.margin_model_eval import (
+        compute_margin_fit_metrics,
+        compute_model_sold,
+        evaluate_margin_target,
+    )
+    from core.optimization.price_optimization import (
+        compute_analytical_margin,
+        compute_optimal_price,
+    )
+
+    mm_sold = Planefit(z0=100.0, a=-2.0, b=0.5)
+    mm_cost = Linefit(z0=5.0, a=0.5, pl=10.0)
+    mm_prices = [10.0, 12.0, 14.0, 16.0, 18.0]
+    mm_stocks = [20.0, 25.0, 30.0, 35.0, 40.0]
+    mm_exact = [compute_analytical_margin(p, s, mm_sold, mm_cost) for p, s in zip(mm_prices, mm_stocks)]
+    exact_metrics = compute_margin_fit_metrics(mm_prices, mm_stocks, mm_exact, mm_sold, mm_cost)
+    assert exact_metrics["n"] == 5
+    assert abs(exact_metrics["rmse"]) < 1e-9 and abs(exact_metrics["mape"]) < 1e-9
+    assert abs(exact_metrics["adj_r2"] - 1.0) < 1e-9
+    noisy = list(mm_exact)
+    noisy[0] += 10.0
+    subset = compute_margin_fit_metrics(mm_prices, mm_stocks, noisy, mm_sold, mm_cost, indices=[1, 2, 3, 4])
+    assert subset["n"] == 4 and abs(subset["rmse"]) < 1e-9
+    assert compute_margin_fit_metrics(mm_prices, mm_stocks, noisy, mm_sold, mm_cost)["rmse"] > 0
+
+    p_opt = compute_optimal_price(30.0, mm_sold, mm_cost)
+    auto = evaluate_margin_target(14.0, 30.0, 70.0, mm_sold, mm_cost, price_target=p_opt, stock_target=30.0)
+    assert auto["is_manual"] is False
+    assert abs(auto["price_diff"] - (p_opt - 14.0)) < 1e-9
+    assert abs(auto["sold_gain"] - (compute_model_sold(p_opt, 30.0, mm_sold) - compute_model_sold(14.0, 30.0, mm_sold))) < 1e-9
+    manual = evaluate_margin_target(14.0, 30.0, 70.0, mm_sold, mm_cost, price_target=20.0, stock_target=50.0)
+    assert manual["is_manual"] is True
+    assert abs(manual["price_diff"] - 6.0) < 1e-9
+    expected_m_gain = (
+        compute_analytical_margin(20.0, 50.0, mm_sold, mm_cost)
+        - compute_analytical_margin(14.0, 30.0, mm_sold, mm_cost)
+    )
+    assert abs(manual["m_gain"] - expected_m_gain) < 1e-9
+    assert abs(manual["sold_gain"] - (compute_model_sold(20.0, 50.0, mm_sold) - compute_model_sold(14.0, 30.0, mm_sold))) < 1e-9
 
     from core.analytics.planner import (
         add_campaign,

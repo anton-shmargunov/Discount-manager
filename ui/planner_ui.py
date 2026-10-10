@@ -63,7 +63,7 @@ def _render_assignment_conflict_dialog() -> None:
     edited = st.data_editor(
         pd.DataFrame(rows),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         disabled=["Basket", "Current Campaign", "Current Job", "New Job"],
         column_config={
             "Approve": st.column_config.CheckboxColumn("Approve", default=True),
@@ -71,17 +71,17 @@ def _render_assignment_conflict_dialog() -> None:
         key=f"_planner_conflict_editor_{editor_rev}",
     )
     all_col, none_col, _ = st.columns([1, 1, 2])
-    if all_col.button("Approve all", use_container_width=True):
+    if all_col.button("Approve all", width="stretch"):
         st.session_state["_planner_conflict_approve_all"] = True
         st.session_state["_planner_conflict_rev"] = editor_rev + 1
         st.rerun()
-    if none_col.button("Keep all", use_container_width=True):
+    if none_col.button("Keep all", width="stretch"):
         st.session_state["_planner_conflict_approve_all"] = False
         st.session_state["_planner_conflict_rev"] = editor_rev + 1
         st.rerun()
 
     confirm_col, cancel_col, _ = st.columns([1, 1, 2])
-    if confirm_col.button("Confirm", type="primary", use_container_width=True):
+    if confirm_col.button("Confirm", type="primary", width="stretch"):
         approved = {
             str(row["Basket"])
             for _, row in edited.iterrows()
@@ -90,7 +90,7 @@ def _render_assignment_conflict_dialog() -> None:
         st.session_state["_planner_conflict_approved"] = approved
         st.session_state["_planner_apply_pending"] = True
         st.rerun()
-    if cancel_col.button("Cancel", use_container_width=True):
+    if cancel_col.button("Cancel", width="stretch"):
         st.session_state["_planner_cancel_pending"] = True
         st.rerun()
 
@@ -257,7 +257,7 @@ def render_sidebar_planner_panel(
                 label_visibility="collapsed",
                 placeholder="Campaign name",
             )
-            if add_c2.button("Add", use_container_width=True, key=wk("planner_add_campaign")):
+            if add_c2.button("Add", width="stretch", key=wk("planner_add_campaign_btn")):
                 add_campaign(planner, new_campaign_name)
                 st.rerun()
 
@@ -270,10 +270,10 @@ def render_sidebar_planner_panel(
                     key=wk(f"planner_rename_campaign_{campaign['id']}"),
                     label_visibility="collapsed",
                 )
-                if rename_c2.button("Rename", use_container_width=True, key=wk("planner_rename_campaign_btn")):
+                if rename_c2.button("Rename", width="stretch", key=wk("planner_rename_campaign_btn")):
                     rename_campaign(planner, str(campaign["id"]), renamed)
                     st.rerun()
-                if st.button("Delete Campaign", use_container_width=True, key=wk("planner_delete_campaign")):
+                if st.button("Delete Campaign", width="stretch", key=wk("planner_delete_campaign_btn")):
                     delete_campaign(planner, str(campaign["id"]))
                     st.rerun()
 
@@ -309,7 +309,7 @@ def render_sidebar_planner_panel(
                     label_visibility="collapsed",
                     placeholder="Job name",
                 )
-                if add_j2.button("Add", use_container_width=True, key=wk("planner_add_job")):
+                if add_j2.button("Add", width="stretch", key=wk("planner_add_job_btn")):
                     add_job(planner, str(campaign["id"]), new_job_name)
                     st.rerun()
 
@@ -323,10 +323,10 @@ def render_sidebar_planner_panel(
                             key=wk(f"planner_rename_job_{job['id']}"),
                             label_visibility="collapsed",
                         )
-                        if job_btn.button("Rename", use_container_width=True, key=wk("planner_rename_job_btn")):
+                        if job_btn.button("Rename", width="stretch", key=wk("planner_rename_job_btn")):
                             rename_job(planner, str(job["id"]), job_new_name)
                             st.rerun()
-                        if st.button("Delete Job", use_container_width=True, key=wk("planner_delete_job")):
+                        if st.button("Delete Job", width="stretch", key=wk("planner_delete_job_btn")):
                             delete_job(planner, str(job["id"]))
                             st.rerun()
                         n_members = len(job.get("basket_ids") or [])
@@ -337,10 +337,10 @@ def render_sidebar_planner_panel(
                 update_disabled = len(planner["selected_job_ids"]) != 1
                 if st.button(
                     "Update",
-                    use_container_width=True,
+                    width="stretch",
                     type="primary",
                     disabled=update_disabled,
-                    key=wk("planner_update_job"),
+                    key=wk("planner_update_job_btn"),
                     help=(
                         "Set the selected Job to the current table selection "
                         "(Multiselect ticks). Unchecked members are unassigned."

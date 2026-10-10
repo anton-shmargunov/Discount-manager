@@ -85,6 +85,7 @@ def clear_product_bs_scope_derived(scope: dict[str, Any]) -> None:
     scope["show_qw_colors"] = False
     scope["show_qw_average"] = False
     scope["fit_sold"] = {}
+    scope["fit_sold_indices"] = {}
     scope["fit_sold_m"] = {}
     scope["fit_cost"] = {}
     scope["bulk_fit_price_sold"] = {}
@@ -92,6 +93,7 @@ def clear_product_bs_scope_derived(scope: dict[str, Any]) -> None:
     scope["bulk_fit_cost_price"] = {}
     scope["fit_sumup_cost"] = None
     scope["fit_sumup_stock_sold"] = None
+    scope["fit_sumup_stock_sold_indices"] = None
     scope["sumup_margin_model"] = None
     scope["margin_model"] = {}
     scope["sumup_select_generation"] = 0

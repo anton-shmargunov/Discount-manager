@@ -419,7 +419,7 @@ def _render_discount_strategy_settings(
                 edited_df = st.data_editor(
                     display_df,
                     hide_index=True,
-                    use_container_width=True,
+                    width="stretch",
                     num_rows="dynamic",
                     key=wk(f"wd_strat_table_{strategy_name}_{editor_key}"),
                     column_config={
@@ -489,7 +489,7 @@ def _render_discount_strategy_settings(
         mtost_edited_df = st.data_editor(
             mtost_display_df,
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             num_rows="dynamic",
             key=wk(f"wd_strat_mtost_bins_v{DISCOUNT_SETTINGS_UI_VERSION}_{editor_key}"),
             column_config={
@@ -522,7 +522,7 @@ def _render_discount_strategy_settings(
             margin_df = st.data_editor(
                 _margin_categories_display_df(initial),
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
                 num_rows="dynamic",
                 key=wk(
                     f"wd_strat_margin_cats_v{DISCOUNT_SETTINGS_UI_VERSION}_{editor_key}"
@@ -849,7 +849,7 @@ def render_week_discount_section(
                 week_discount_filter_map,
             ),
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             num_rows="fixed",
             height=118,
             key=wk(f"wd_filter_table_{selected_week}"),
@@ -924,13 +924,12 @@ def render_week_discount_section(
     apply_disabled = bool(campaign_on and not job_targets)
     if st.button(
         "Apply",
-        key=wk(f"wd_strategy_save_{selected_week}"),
+        key=wk(f"wd_strategy_save_{selected_week}_btn"),
         help=(
             "Save the on-screen Discount and Prom settings to the default pool "
             "or to the selected Campaign/Jobs."
         ),
         disabled=apply_disabled,
-        use_container_width=False,
     ):
         if campaign_on:
             n = apply_settings_to_jobs(
@@ -980,37 +979,37 @@ def render_week_discount_section(
     )
     generate_discount_clicked = gen_disc_col.button(
         "Generate Discount",
-        key=wk(f"wd_generate_discount_{selected_week}"),
+        key=wk(f"wd_generate_discount_{selected_week}_btn"),
         help=(
             "Off: unassigned baskets, using the on-screen default settings. "
             "On: Planner-selected Job baskets, using the on-screen settings."
         ),
         disabled=edit_mode or (campaign_on and not job_targets),
-        use_container_width=True,
+        width="stretch",
     )
     generate_prom_clicked = gen_prom_col.button(
         "Generate Prom",
-        key=wk(f"wd_generate_prom_{selected_week}"),
+        key=wk(f"wd_generate_prom_{selected_week}_btn"),
         help=(
             "Off: unassigned baskets, using the on-screen default settings. "
             "On: Planner-selected Job baskets, using the on-screen settings."
         ),
         disabled=edit_mode or (campaign_on and not job_targets),
-        use_container_width=True,
+        width="stretch",
     )
     generate_discount_all_clicked = gen_disc_all_col.button(
         "Generate Discount all",
-        key=wk(f"wd_generate_discount_all_{selected_week}"),
+        key=wk(f"wd_generate_discount_all_{selected_week}_btn"),
         help="All Jobs (stored settings) plus unassigned baskets (stored default).",
         disabled=edit_mode,
-        use_container_width=True,
+        width="stretch",
     )
     generate_prom_all_clicked = gen_prom_all_col.button(
         "Generate Prom all",
-        key=wk(f"wd_generate_prom_all_{selected_week}"),
+        key=wk(f"wd_generate_prom_all_{selected_week}_btn"),
         help="All Jobs (stored settings) plus unassigned baskets (stored default).",
         disabled=edit_mode,
-        use_container_width=True,
+        width="stretch",
     )
     all_baskets = [
         str(row.get("Basket", ""))
@@ -1082,23 +1081,23 @@ def render_week_discount_section(
         apply_col, cancel_col, _ = st.columns([_btn_w, _btn_w, _btn_pad - _btn_w])
         apply_clicked = apply_col.button(
             "Apply",
-            key=wk(f"wd_manual_apply_{selected_week}"),
+            key=wk(f"wd_manual_apply_{selected_week}_btn"),
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
         cancel_clicked = cancel_col.button(
             "Cancel",
-            key=wk(f"wd_manual_cancel_{selected_week}"),
-            use_container_width=True,
+            key=wk(f"wd_manual_cancel_{selected_week}_btn"),
+            width="stretch",
         )
     else:
         edit_col, _ = st.columns([_btn_w, _btn_pad])
         edit_clicked = edit_col.button(
             "Edit",
-            key=wk(f"wd_manual_edit_btn_{selected_week}"),
+            key=wk(f"wd_manual_edit_{selected_week}_btn"),
             help="Edit New Discount and New Prom for visible baskets.",
             disabled=not can_manual_edit,
-            use_container_width=True,
+            width="stretch",
         )
         if edit_clicked:
             progress.empty()
@@ -1152,7 +1151,7 @@ def render_week_discount_section(
             edit_df,
             column_config=_week_discount_edit_column_config(visible_columns),
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             num_rows="fixed",
             key=editor_key,
         )
@@ -1190,7 +1189,7 @@ def render_week_discount_section(
     else:
         st.dataframe(
             _week_discount_styler(df_week_discount),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             key=wk(f"week_discount_table_{selected_week}_{table_state_key}"),
         )
@@ -1264,11 +1263,11 @@ def render_week_discount_section(
             file_name=f"week_discount_{selected_week}.csv",
             mime="text/csv",
             disabled=df_export.empty or edit_mode,
-            use_container_width=True,
+            width="stretch",
             key=wk(
                 f"week_discount_export_{selected_week}_{view_state_key}_"
                 f"{filter_state_key}_{gen_state_key}_{prom_state_key}_"
-                f"{manual_state_key}_{int(include_no_stock)}"
+                f"{manual_state_key}_{int(include_no_stock)}_btn"
             ),
             help=(
                 "Export visible Week Discount columns (raw numeric values). "
@@ -1306,12 +1305,12 @@ def render_week_discount_section(
                 file_name=f"discount_hist_{next_week_meta['year_week']}.csv",
                 mime="text/csv",
                 disabled=df_hist_export.empty or edit_mode,
-                use_container_width=True,
+                width="stretch",
                 key=wk(
                     f"week_discount_hist_export_{selected_week}_{view_state_key}_"
                     f"{filter_state_key}_{gen_state_key}_{prom_state_key}_"
                     f"{manual_state_key}_{int(include_no_stock)}_{int(export_all_history)}_"
-                    f"{discount_hist_category}"
+                    f"{discount_hist_category}_btn"
                 ),
                 help=(
                     "Export New Discount / New Prom in discount-history input format "
@@ -1378,13 +1377,13 @@ def render_week_discount_section(
                     ),
                     mime="text/csv",
                     disabled=df_all_hist.empty or edit_mode or not category_rows,
-                    use_container_width=True,
+                    width="stretch",
                     key=wk(
                         f"week_discount_hist_export_all_bs_{selected_week}_"
                         f"{view_state_key}_{filter_state_key}_{gen_state_key}_"
                         f"{prom_state_key}_{manual_state_key}_"
                         f"{int(include_no_stock)}_{int(export_all_history)}_"
-                        f"{len(category_rows)}"
+                        f"{len(category_rows)}_btn"
                     ),
                     help=(
                         "Combine New Discount / New Prom from every Product BS Category "
@@ -1397,14 +1396,14 @@ def render_week_discount_section(
             hist_export_col.button(
                 "Discount history. Current",
                 disabled=True,
-                use_container_width=True,
+                width="stretch",
                 help="Week metadata unavailable for discount-history export.",
             )
             if hist_all_col is not None:
                 hist_all_col.button(
                     "Discount history. All",
                     disabled=True,
-                    use_container_width=True,
+                    width="stretch",
                     help="Week metadata unavailable for discount-history export.",
                 )
 
@@ -1469,7 +1468,7 @@ def render_week_discount_section(
         ]
         st.dataframe(
             pd.DataFrame(comparison_rows),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             key=wk(
                 f"wd_weighted_compare_{selected_week}_{weight_metric}_{table_state_key}"

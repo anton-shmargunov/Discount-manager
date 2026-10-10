@@ -2,7 +2,7 @@
 
 **Pricing Correlation & Bucket Analysis · Phase 1**
 
-Version 1.0.0 · Last updated 2026-09-12
+Version 1.0.1.t1 · Last updated 2026-10-08
 
 ---
 
@@ -14,9 +14,10 @@ PBA helps pricing analysts:
 2. Compute correlations and cluster baskets
 3. Drill into individual baskets and weeks
 4. Review aggregate **Sum-Up** metrics
-5. Plan **discounts and promotions** for a selected week using strategy rules or manual edits
-6. Export results and updated discount history
-7. Optionally **Save** the session as a `.disc_proj` file and **Restore** it later
+5. Group baskets into **Campaigns and Jobs**, each with its own discount / prom strategy
+6. Plan **discounts and promotions** for a selected week using strategy rules or manual edits
+7. Export results and updated discount history
+8. Optionally **Save** the session as a `.disc_proj` file and **Restore** it later
 
 **Live app:** https://discount-manager-v1-1.streamlit.app/
 
@@ -38,6 +39,16 @@ Open http://localhost:8501
 1. Open **Correlation Analysis** in the sidebar (main workflow)
 2. The home page (`app.py`) shows a brief overview only
 
+### Sign in
+
+**Correlation Analysis** asks for a **Login** and **Password**. Your administrator gives you these.
+
+- After 5 wrong attempts, that login is locked for 5 minutes.
+- Refreshing the page or opening a new tab asks you to sign in again. Save a `.disc_proj` first if you need your work.
+- **Log out** (sidebar) ends the session and clears unsaved work.
+
+**Administrators:** run `python scripts/hash_password.py` and paste the printed entry into `.streamlit/secrets.toml` (local) or the app's **Settings → Secrets** (Streamlit Cloud). To remove access, delete the user's entry. Details: [architecture.md → Access control](architecture.md#access-control).
+
 ---
 
 ## Workflow overview
@@ -49,9 +60,11 @@ Optional: K-Means or Octants clustering
        ↓
 Browse basket table → Click a row → Basket Detail
        ↓
+Optional: Planner → Campaigns / Jobs
+       ↓
 Sum-Up section → Select a week
        ↓
-Week Discount → Generate / Edit → Export
+Week Discount → Apply strategy → Generate / Edit → Export
        ↓
 Optional: Project → Save… / Restore (.disc_proj)
 ```
@@ -150,10 +163,27 @@ Sortable table of all baskets with:
 - Correlations: Corr(S/P), Corr(M/P), Corr(M/S)
 - Stock trend metrics
 - Cluster group
+- **Campaign** and **Job** from the Planner (empty for unassigned baskets)
 
 Buttons **Fit Price x Sold**, **Fit Price x Stock x Sold**, and **Fit Cost x Price** add extra columns only after they produce results. **Fit Cost x Price** lives in its own expander. **Skip last points** (default **4**) drops the latest weeks from the fit; **Skip 0** (on by default) drops weeks where Price = 0. **Cost correction** (default **From the last point**) plus **a_min** / **a_max** control **Cost Corrected** on Basket Detail. **Correct Margin** replaces skipped-week margin with **Margin Corrected** = Margin + Sold × (Cost − Cost Corrected). **Price_max** always uses the regression intercept (Option A), not the re-anchored intercept.
 
 **Click any row** to open **⑤ Basket Detail** for that basket.
+
+### Combination
+
+The **Combination** expander shows several baskets summed together in Basket Detail (like Sum-Up):
+
+| Control | Effect |
+|---------|--------|
+| **Group** | Preview one cluster or octant group |
+| **Set a Job** | Create a new Job in the selected Planner Campaign from this Group |
+| **Multiselect** | Tick several table rows to combine them |
+| **Select All** (with Multiselect) | Use every basket in the table |
+| **Weights** | Weight Discount and Prom by Stock, CountProduct or Sold |
+
+Basket Detail uses the first of these that applies: **Group** → **Select All** → ticked table rows → **Planner focus** (the selected Jobs or, with no Job selected, the whole selected Campaign).
+
+> **Tip:** To see a single basket again, set the Planner **Campaign** to **Select…**.
 
 ---
 
@@ -175,7 +205,34 @@ Expand metrics to plot over time (Sold, Price, Margin, Stock, etc.). **Discount*
 
 ### Regression fits
 
-Run plane and line fits on selected week ranges; view R², RMSE, MAPE. **Margin model** shows analytical optimal price for the selected week.
+Run plane and line fits on selected week ranges; view R², RMSE, MAPE. **Fit Plane** remembers which weeks it used; the margin model's error metrics are computed over the same weeks.
+
+### Margin optimisation model
+
+In the **3D Overview: Price × Stock × M + Margin Optimisation** expander. The model is
+
+```
+Sold(P, S) = z0 + a·P + b·S                      (Sold plane fit)
+M(P, S)    = (P·(1 − a_cost) − z0_cost) · Sold(P, S)   (with the Cost line fit)
+```
+
+1. Fit the Cost line and the Sold plane.
+2. Pick the **Evaluation Week**.
+3. Optionally change **Price (manual)** / **Stock (manual)**. They default to Price_max and the actual stock of that week, and reset when the week or the fits change. If you change only Stock, Price follows Price_max for the new stock until you edit Price yourself.
+4. Click **▶ Run Margin Model**. Manual inputs only take effect on this click.
+
+Results are shown in four columns:
+
+| Column | Shows |
+|--------|-------|
+| **Actual Results** | Price, Stock, Margin and Sold of the evaluation week |
+| **Model Error Metrics** | Adj R², RMSE, MAPE of model M vs actual M over the Sold plane fit weeks |
+| **Model at Price (actual)** | Model M, \|dM\| error, Error %, Sold (model) at the actual point |
+| **Optimisation** | Price_max (delta = Price_diff vs actual price), M surplus (gain), Sold gain |
+
+When the manual inputs differ from the defaults, the first Optimisation metric is labelled **Price (manual)**, and Price_diff, M surplus and Sold gain are measured at the manual point. With **Margin Corrected** on, actual M is the corrected (hybrid) margin.
+
+> **Note:** If the Sold fit rises with Price, Price_max is a margin *minimum* and M surplus comes out negative. Check Adj R² before trusting Price_max. Models saved before this version show N/A for the new fields until you click Run again.
 
 ---
 
@@ -187,6 +244,20 @@ Weekly aggregates across all baskets that passed filters:
 - Overall correlation KPIs per week
 - Monthly Reserve and related metrics
 
+### Display toggles
+
+One row of toggles at the top of the **Sum-Up Total** expander applies to **all** Sum-Up plots (all off by default):
+
+| Toggle | Effect |
+|--------|--------|
+| **Line + Symbol** | Connect weekly points with lines |
+| **Colour by Quadweek** | Colour markers by quadweek. In the combined multi-Y plot the fill shows the quadweek and the outline keeps the series colour |
+| **QW Average** | Dashed horizontal line per quadweek (on each series' own axis in the combined plot; per panel in Vertical Stack) |
+
+They work in all three progress views: **Separate plots**, **Combined multi-Y-axis plot** and **Vertical Stack**. On fitted charts, fitted weeks use quadweek colours and the rest are grey.
+
+The Sum-Up margin model works like the [Basket Detail one](#margin-optimisation-model), with **W. Price (manual)** / **Total Stock (manual)** inputs and Total Sold metrics.
+
 ### Select a week
 
 In the Sum-Up week selector, pick **one week** to drive the sections below:
@@ -196,6 +267,29 @@ In the Sum-Up week selector, pick **one week** to drive the sections below:
 - **📅 Week Visualization** — 3-panel Plotly chart for the week
 
 Only one week is active at a time.
+
+---
+
+## Campaign / Job Planner
+
+The sidebar **Planner** expander (below **Project**) groups baskets for planning:
+
+- A **Campaign** contains **Jobs**; a **Job** contains baskets.
+- A basket belongs to **at most one Job**.
+- Each Job keeps its own Discount and Prom strategy settings. Baskets with no Job use the **default** settings.
+- The Planner is per Product BS category, is kept when you rebuild, and is saved in `.disc_proj`.
+
+| Task | How |
+|------|-----|
+| Create a Campaign | Type a name → **Add** |
+| Create a Job | Select the Campaign → type a Job name → **Add** |
+| Rename / delete | Select one Campaign or one Job → **Rename** / **Delete** |
+| Fill a Job from the table | Select exactly one Job, tick baskets in ④ (Multiselect) → **Update**. Unticked members leave the Job |
+| Fill a new Job from a Group | ④ Combination → pick a **Group** → **Set a Job** |
+
+If some baskets already belong to another Job, a **Job assignment conflicts** dialog lists them. Use **Approve all** / **Keep all** or tick rows, then **Confirm**. Only approved baskets move; **Cancel** changes nothing.
+
+Selecting a Campaign or Jobs also sets the **Planner focus** used by Basket Detail (see [Combination](#combination)).
 
 ---
 
@@ -211,6 +305,8 @@ Use toggles to show/hide metric groups:
 
 - **Discount / Prom** — New values, deltas, historical levels at W, W−1, W−4, W−5
 - **Stock, Margin, Sold, Price, …** — context metrics for strategy decisions
+
+**Campaign** and **Job** columns follow the Prom columns.
 
 Historical discount/prom columns use quadweek labels when available, e.g. `Discount[3,2]`.
 
@@ -234,6 +330,17 @@ Set bounds on New Discount, Stock, dSt_QW, Margin, MtoSt, Monthly Reserve, etc. 
 ## Discount strategy
 
 Expand **Discount strategy settings** in the Week Discount section.
+
+### Which settings you are editing
+
+The **Campaign** switch above the strategy settings decides what the on-screen settings belong to:
+
+| Campaign switch | On-screen settings | **Apply** saves them to |
+|-----------------|--------------------|-------------------------|
+| Off | Default settings (baskets with no Job) | The default |
+| On | The Job(s) selected in the Planner | Every selected Job (overwrites them) |
+
+Assignment of baskets to Jobs is edited only in the [Planner](#campaign--job-planner).
 
 ### Generation mode
 
@@ -270,7 +377,13 @@ If a basket has no discount history row for the current week, **Discount[current
 
 ### Generate Discount
 
-Click **Generate Discount** to compute **New Discount** for all visible baskets using the current strategy settings.
+| Button | Baskets | Settings used | Earlier generated values |
+|--------|---------|---------------|--------------------------|
+| **Generate Discount**, Campaign switch off | Baskets with no Job | On-screen | Kept for other baskets |
+| **Generate Discount**, Campaign switch on | Baskets of the selected Jobs | On-screen | Kept for other baskets |
+| **Generate Discount all** | Every basket | Each Job's saved settings; saved default for baskets with no Job | Replaced |
+
+Click **Apply** first if you want **Generate … all** to use settings you just changed on screen. **Generate Prom** / **Generate Prom all** work the same way.
 
 ---
 
@@ -282,7 +395,7 @@ Expand **Prom strategy settings**.
 |------|--------|
 | **Set previous prom** | New Prom = Prom[current] |
 
-Click **Generate Prom** separately from discount generation.
+Click **Generate Prom** (or **Generate Prom all**) separately from discount generation. Basket and settings selection follow the [Generate Discount](#generate-discount) rules.
 
 **Order of operations:**
 
@@ -358,6 +471,8 @@ Requires discount history upload at **Build** for a full merge when **all histor
 
 Export column set depends on Product BS Category (report mode uses Aggregated columns). Combined **All** files contain every category column; unused cells stay empty.
 
+Discount-history exports end with four Planner columns: `campaign_id`, `campaign_name`, `job_id`, `job_name` (empty for baskets with no Job).
+
 ---
 
 ## Discount history format
@@ -410,15 +525,22 @@ The sidebar **Project** expander (above **Log**) snapshots the current session.
 
 What is saved:
 
-- Built analysis for every Product BS category / input mode in the session
+- Built analysis for every Product BS category / input mode in the session, with discount history already merged
+- The uploaded discount history (used by the **all history** export)
+- The Planner: Campaigns, Jobs, memberships and their strategy settings
 - Week Discount generated values and manual edits
+- Fits and margin models
 - Filters, clustering, and other UI settings
 - Sidebar log
 
 What is **not** saved:
 
-- Original CSV uploads (you do not need to re-attach them after Restore — analysis is in the snapshot)
+- Your sign-in (you always sign in yourself)
+- Original CSV uploads. You do not need to re-attach them after Restore; the uploaders are only read by **Build Project**
+- Button clicks and table-selection widget states
 - A remembered disk folder (the browser chooses where downloads go)
+
+Project files saved on Streamlit Cloud open locally and vice versa.
 
 Refresh or a new browser tab still starts empty unless you Restore a file.
 
@@ -446,13 +568,15 @@ Use it for troubleshooting when results look unexpected.
 3. Set filters → **Build Project** (repeat for each Product BS category you need)
 4. Optional: **K-Means** or **Octants**
 5. Click a basket → review Basket Detail (optional)
-6. In Sum-Up, select target week
-7. Open **Week Discount**
-8. Configure strategy → **Generate Discount** → **Generate Prom**
-9. **Edit** / **Apply** manual adjustments
-10. Open **Export** → **Week Discount**, **Discount history. Current**, and/or **Discount history. All**
-11. Re-import exported discount history on the next planning cycle
-12. Optional: **Project → Save…** to download a `.disc_proj` snapshot
+6. Optional: **Planner** → create Campaigns / Jobs and fill them (**Update** or **Set a Job**)
+7. In Sum-Up, select target week
+8. Open **Week Discount**
+9. Configure strategy → **Apply** (default with the Campaign switch off; Jobs with it on)
+10. **Generate Discount** / **Generate Prom**, or **Generate Discount all** / **Generate Prom all**
+11. **Edit** / **Apply** manual adjustments
+12. Open **Export** → **Week Discount**, **Discount history. Current**, and/or **Discount history. All**
+13. Re-import exported discount history on the next planning cycle
+14. Optional: **Project → Save…** to download a `.disc_proj` snapshot
 
 ---
 
@@ -460,6 +584,9 @@ Use it for troubleshooting when results look unexpected.
 
 | Symptom | Likely cause | Action |
 |---------|--------------|--------|
+| "Access is not configured" | No users in the app secrets | Administrator adds `[app_users]` entries |
+| "Too many failed attempts" | 5 wrong passwords for that login | Wait 5 minutes |
+| Asked to sign in again | Page refreshed or new tab | Expected; sign in, then Restore a saved project if needed |
 | Sections below build are empty | Build not run or failed | Upload file, click Build, check sidebar log |
 | K-Means / Octants disabled | No analysis in current scope | Build Project first |
 | Discount/Prom columns empty | No discount history uploaded | Upload discount history and rebuild |
@@ -470,6 +597,11 @@ Use it for troubleshooting when results look unexpected.
 | Prom export rejected on re-import | Invalid prom step | Use 0, 0.02, 0.04, … only |
 | Restore failed / buttons error | Invalid file or widget-key conflict | Use a `.disc_proj` from this app version; retry Restore |
 | Restored session has no CSV files | Uploads are not stored in the project file | Expected — analysis is restored from the snapshot |
+| Basket Detail shows a combination instead of the clicked basket | A Planner Campaign / Job is selected (Planner focus) | Set the Planner **Campaign** to **Select…** |
+| **Generate Discount** is disabled with the Campaign switch on | No Job selected in the Planner | Select one or more Jobs, or turn the switch off |
+| **Update** is disabled | Not exactly one Job selected | Select a single Job |
+| Margin model shows N/A for Sold / metrics | Model saved before this version | Click **▶ Run Margin Model** again |
+| M surplus is negative | Sold fit rises with Price (weak fit) | Check Adj R²; refit with other weeks |
 
 ---
 
@@ -477,7 +609,7 @@ Use it for troubleshooting when results look unexpected.
 
 - Analysis results and generated discounts live in **browser session state** until you save
 - Refreshing the page or closing the tab **clears unsaved work**
-- **Project → Save…** downloads a `.disc_proj` snapshot; **Restore** loads it in a new session
+- **Project → Save…** downloads a `.disc_proj` snapshot (including the Planner); **Restore** loads it in a new session
 - Export CSV files to persist Week Discount and discount history outputs independently of the project file
 - Strategy defaults reload from `configs/strategies/strategies.v1.csv` on each session (saved UI edits to bins are included in `.disc_proj`)
 
@@ -487,3 +619,4 @@ Use it for troubleshooting when results look unexpected.
 
 - [architecture.md](architecture.md) — technical structure for developers
 - [README.md](../README.md) — install and quick start
+- [CHANGELOG.md](../CHANGELOG.md) — what changed in each version

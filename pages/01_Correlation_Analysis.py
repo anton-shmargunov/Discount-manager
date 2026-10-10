@@ -54,6 +54,7 @@ from core.analytics.planner import (
     focused_baskets,
     get_campaign,
 )
+from ui.auth_gate import require_login
 from ui.week_discount_ui import render_week_discount_section
 from ui.project_save_ui import apply_pending_project_restore, render_sidebar_project_panel
 from ui.planner_ui import begin_job_assignment, render_sidebar_planner_panel
@@ -87,6 +88,11 @@ from core.optimization.price_optimization import (
     build_margin_surface,
     compute_price_max_curve,
 )
+from core.optimization.margin_model_eval import (
+    compute_margin_fit_metrics,
+    evaluate_margin_target,
+    price_max_or_fallback,
+)
 from core.statistics.correlations import compute_pearson
 from core.statistics.metrics import monthly_reserve_series
 from core.statistics.ratios import ratio_series
@@ -99,14 +105,16 @@ from visualizations.detail_charts import (
     build_3d_price_stock_m,
     build_price_max_curve,
 )
-from visualizations.progress_stack import build_vertical_stack_from_specs
+from visualizations.sumup_qw_charts import (
+    build_combined_progress_qw,
+    build_sumup_3d_qw,
+    build_sumup_3panel_qw,
+    build_sumup_cost_vs_price_qw,
+    build_sumup_stock_m_3d_qw,
+    build_sumup_stock_sold_3d_qw,
+    build_vertical_stack_from_specs_qw,
+)
 from visualizations.sumup_charts import (
-    build_combined_progress,
-    build_sumup_cost_vs_price,
-    build_sumup_3panel,
-    build_sumup_3d,
-    build_sumup_stock_m_3d,
-    build_sumup_stock_sold_3d,
     build_metric_progress,
     build_weekly_basket_3panel,
     build_weekly_basket_3d,
@@ -786,6 +794,118 @@ def _render_linefit_stats(fit: Linefit) -> None:
         st.metric("MAPE", "N/A" if math.isnan(fit.mape) else f"{fit.mape:.2f}%")
 
 
+def _finite_or(value: float | None, fallback: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return number if math.isfinite(number) else fallback
+
+
+def _render_manual_point_inputs(
+    price_key: str,
+    stock_key: str,
+    state_key: str,
+    week_idx: int,
+    price_actual: float,
+    stock_actual: float,
+    fit_sold: Planefit,
+    fit_cost: Linefit,
+    price_label: str,
+    stock_label: str,
+) -> tuple[float, float]:
+    """Price/Stock (manual) inputs defaulting to Price_max and actual stock of the week.
+
+    Price follows Price_max of the entered stock until the user overrides it.
+    """
+    stock_default = _finite_or(stock_actual)
+    price_fallback = _finite_or(price_actual)
+    fit_sig = (fit_sold.z0, fit_sold.a, fit_sold.b, fit_cost.z0, fit_cost.a)
+    base = (int(week_idx), stock_default, fit_sig)
+    state = st.session_state.get(state_key)
+    if (
+        not isinstance(state, dict)
+        or state.get("base") != base
+        or price_key not in st.session_state
+        or stock_key not in st.session_state
+    ):
+        stock_val = stock_default
+        price_default = _finite_or(
+            price_max_or_fallback(stock_val, fit_sold, fit_cost, price_fallback),
+            price_fallback,
+        )
+        st.session_state[stock_key] = stock_val
+        st.session_state[price_key] = price_default
+    else:
+        stock_val = _finite_or(st.session_state.get(stock_key), stock_default)
+        price_default = _finite_or(
+            price_max_or_fallback(stock_val, fit_sold, fit_cost, price_fallback),
+            price_fallback,
+        )
+        current_price = _finite_or(st.session_state.get(price_key), price_default)
+        if math.isclose(current_price, float(state.get("price_default", current_price)),
+                        rel_tol=1e-9, abs_tol=1e-9):
+            st.session_state[price_key] = price_default
+    st.session_state[state_key] = {"base": base, "price_default": price_default}
+
+    pc, sc = st.columns(2)
+    price_manual = pc.number_input(price_label, key=price_key, format="%.2f")
+    stock_manual = sc.number_input(stock_label, key=stock_key, format="%.2f")
+    return float(price_manual), float(stock_manual)
+
+
+def _delta_text(value: float | None) -> str | None:
+    if value is None or not math.isfinite(float(value)):
+        return None
+    return f"{float(value):+.2f}"
+
+
+def _render_margin_model_results(saved_model: dict, labels: dict[str, str]) -> None:
+    res = saved_model["result"]
+    target = saved_model.get("target") or {}
+    metrics = saved_model.get("metrics") or {}
+    is_manual = bool(target.get("is_manual"))
+    price_target = target.get("price_target", res.price_max)
+    price_diff = target.get("price_diff", res.price_diff)
+    m_gain = target.get("m_gain", res.m_surplus)
+
+    rc1, rc2, rc3, rc4 = st.columns(4)
+    with rc1:
+        st.markdown("**Actual Results**")
+        st.metric(labels["price_actual"], _fmt(res.price_actual))
+        st.metric(labels["stock_actual"], _fmt(res.stock_actual))
+        st.metric(labels["margin_actual"], _fmt(res.m_actual))
+        st.metric(labels["sold_actual"], _fmt(target.get("sold_actual")))
+    with rc2:
+        st.markdown("**Model Error Metrics**")
+        adj_r2 = metrics.get("adj_r2", float("nan"))
+        mape = metrics.get("mape", float("nan"))
+        st.metric("Adj R²", "N/A" if math.isnan(adj_r2) else f"{adj_r2:.4f}")
+        st.metric("RMSE", _fmt(metrics.get("rmse")))
+        st.metric("MAPE", "N/A" if math.isnan(mape) else f"{mape:.2f}%")
+        if metrics:
+            st.caption(f"Margin fit over {int(metrics.get('n', 0))} week(s) of the Sold plane fit.")
+    with rc3:
+        st.markdown("**Model at Price (actual)**")
+        st.metric(labels["margin_model"], _fmt(res.m_model))
+        st.metric("|dM| error", _fmt(res.m_error_abs))
+        st.metric("Error %", _fmt(res.m_error_pct))
+        st.metric(labels["sold_model"], _fmt(target.get("sold_model")))
+    with rc4:
+        st.markdown("**Optimisation**")
+        st.metric(
+            labels["price_manual"] if is_manual else "Price_max",
+            _fmt(price_target),
+            delta=_delta_text(price_diff),
+        )
+        st.metric(labels["m_gain"], _fmt(m_gain))
+        st.metric(labels["sold_gain"], _fmt(target.get("sold_gain")))
+        if is_manual:
+            st.caption(
+                f"Manual point: {labels['stock_manual']} {_fmt(target.get('stock_target'))}"
+            )
+
+
 def _render_margin_model(
     basket_name: str,
     ts: BasketTimeSeries,
@@ -794,6 +914,7 @@ def _render_margin_model(
     scope: dict,
     sk,
     m_values: list[float] | None = None,
+    fit_indices: list[int] | None = None,
 ) -> None:
 
     def wk(widget_key: str) -> str:
@@ -801,9 +922,9 @@ def _render_margin_model(
 
     m_series = list(m_values) if m_values is not None else list(ts.m)
 
-    set_clmn, result_clmn = st.columns([1, 2])
+    set_clmn, result_clmn = st.columns([1, 3])
     with set_clmn.container(border=True):
-        run_margin_model_clicked = st.button("▶ Run Margin Model", key=wk(f"run_model_{basket_name}"))
+        run_margin_model_clicked = st.button("▶ Run Margin Model", key=wk(f"run_model_{basket_name}_btn"))
         """Render the analytical margin optimisation UI block."""
         week_options = {
             f"{week}  (QW:{ts.quadweeks[i]})": i
@@ -832,6 +953,19 @@ def _render_margin_model(
         n_p = st.slider("Price grid points", 10, 100, 50, key=wk(f"np_{basket_name}"))
         n_s = st.slider("Stock grid points", 10, 100, 50, key=wk(f"ns_{basket_name}"))
 
+        price_manual, stock_manual = _render_manual_point_inputs(
+            price_key=wk(f"mm_price_manual_{basket_name}"),
+            stock_key=wk(f"mm_stock_manual_{basket_name}"),
+            state_key=wk(f"mm_point_state_{basket_name}"),
+            week_idx=week_idx,
+            price_actual=ts.price[week_idx],
+            stock_actual=ts.stock[week_idx],
+            fit_sold=fit_sold,
+            fit_cost=fit_cost,
+            price_label="Price (manual)",
+            stock_label="Stock (manual)",
+        )
+
         if run_margin_model_clicked:
             res = evaluate_week_margin_model(
                 week=ts.weeks[week_idx],
@@ -840,6 +974,18 @@ def _render_margin_model(
                 m_actual=m_series[week_idx],
                 fit_sold=fit_sold,
                 fit_cost=fit_cost,
+            )
+            target = evaluate_margin_target(
+                price_actual=ts.price[week_idx],
+                stock_actual=ts.stock[week_idx],
+                sold_actual=ts.sold[week_idx],
+                fit_sold=fit_sold,
+                fit_cost=fit_cost,
+                price_target=price_manual,
+                stock_target=stock_manual,
+            )
+            metrics = compute_margin_fit_metrics(
+                ts.price, ts.stock, m_series, fit_sold, fit_cost, indices=fit_indices,
             )
             prices_grid, stocks_grid, m_grid = build_margin_surface(
                 fit_sold, fit_cost,
@@ -850,6 +996,8 @@ def _render_margin_model(
             p_max_vals = compute_price_max_curve(fit_sold, fit_cost, stocks_grid)
             scope["margin_model"][basket_name] = {
                 "result": res,
+                "target": target,
+                "metrics": metrics,
                 "surface": (prices_grid, stocks_grid, m_grid),
                 "stock_grid": stocks_grid,
                 "price_max_values": p_max_vals,
@@ -859,52 +1007,28 @@ def _render_margin_model(
         saved_model = scope["margin_model"].get(basket_name)
         if saved_model:
             with st.container(border=True):
-                res = saved_model["result"]
-                rc1, rc2, rc3 = st.columns(3)
-                with rc1:
-                    st.markdown("**Actual Results**")
-                    st.metric(f"Price (actual)", _fmt( res.price_actual ) )
-                    st.metric(f"Stock (actual)", _fmt( res.stock_actual ) )
-                    st.metric(f"Margin (actual)", _fmt( res.m_actual ) )
-                    
-                    # st.write(f"Price (actual): `{res.price_actual:.2f}`")
-                    # st.write(f"Stock (actual): `{res.stock_actual:.2f}`")
-                    # st.write(f"Margin (actual): `{res.m_actual:.2f}`")
-                    # st.write(f"Margin (model):   `{res.m_model:.2f}`")
-                    # st.write(f"|dM| error:     `{res.m_error_abs:.2f}`")
-                    # st.write(f"Error %:        `{_fmt(res.m_error_pct)}%`")
-
-                    # rc1_1, rc1_2 = st.columns(2)
-                    # with rc1_1:
-                    #     st.markdown("**Actual Results**")
-                    #     st.metric(f"Price (actual)", _fmt( res.price_actual ) )
-                    #     st.metric(f"Stock (actual)", _fmt( res.stock_actual ) )
-                    #     st.metric(f"Margin (actual)", _fmt( res.m_actual ) )
-
-                    # with rc1_2:
-                    #     st.markdown("**Model at Price (actual)**")
-                    #     st.metric(f"Margin (model)", _fmt(res.m_model))
-                    #     st.metric(f"|dM| error", _fmt(res.m_error_abs))
-                    #     st.metric(f"Error %", _fmt(res.m_error_pct))
-
-                with rc2:
-                    st.markdown("**Model at Price (actual)**")
-                    st.metric(f"Margin (model)", _fmt(res.m_model))
-                    st.metric(f"|dM| error", _fmt(res.m_error_abs))
-                    st.metric(f"Error %", _fmt(res.m_error_pct))
-                with rc3:
-                    st.markdown("**Optimisation**")
-                    #st.metric("Price_max",       _fmt(res.price_max), delta=f"{res.price_diff:+.2f}" )
-                    st.metric("Price_max",       _fmt(res.price_max) )
-                    st.metric("Price_diff",      _fmt(res.price_diff),)
-                    st.metric("M surplus (gain)", _fmt(res.m_surplus))
+                _render_margin_model_results(
+                    saved_model,
+                    {
+                        "price_actual": "Price (actual)",
+                        "stock_actual": "Stock (actual)",
+                        "margin_actual": "Margin (actual)",
+                        "sold_actual": "Sold",
+                        "margin_model": "Margin (model)",
+                        "sold_model": "Sold (model)",
+                        "price_manual": "Price (manual)",
+                        "stock_manual": "Stock (manual)",
+                        "m_gain": "M surplus (gain)",
+                        "sold_gain": "Sold gain",
+                    },
+                )
 
     if saved_model:
         fig_pmax = build_price_max_curve(
             saved_model["stock_grid"],
             saved_model["price_max_values"],
         )
-        st.plotly_chart(fig_pmax, use_container_width=True,
+        st.plotly_chart(fig_pmax,
                         key=wk(f"pmax_curve_{basket_name}"))
 
 
@@ -915,14 +1039,15 @@ def _render_sumup_margin_model(
     scope: dict,
     sk,
     margin_key: str = "total_m",
+    fit_indices: list[int] | None = None,
 ) -> None:
 
     def wk(widget_key: str) -> str:
         return sk(widget_key)
     """Render analytical margin optimisation for aggregate Sum-Up weekly data."""
-    set_clmn, result_clmn = st.columns([1, 2])
+    set_clmn, result_clmn = st.columns([1, 3])
     with set_clmn.container(border=True):
-        run_margin_model_clicked = st.button("▶ Run Margin Model", key=wk("run_sumup_margin_model"))
+        run_margin_model_clicked = st.button("▶ Run Margin Model", key=wk("run_sumup_margin_model_btn"))
         week_options = {
             f"{row['week']}  (QW:{row.get('quadweek', 'N/A')})": i
             for i, row in enumerate(sumup_rows)
@@ -965,8 +1090,22 @@ def _render_sumup_margin_model(
         n_p = st.slider("Price grid points", 10, 100, 50, key=wk("sumup_np"))
         n_s = st.slider("Stock grid points", 10, 100, 50, key=wk("sumup_ns"))
 
+        selected_row = sumup_rows[week_idx]
+        price_manual, stock_manual = _render_manual_point_inputs(
+            price_key=wk("sumup_mm_price_manual"),
+            stock_key=wk("sumup_mm_stock_manual"),
+            state_key=wk("sumup_mm_point_state"),
+            week_idx=week_idx,
+            price_actual=selected_row["weighted_price"],
+            stock_actual=selected_row["total_stock"],
+            fit_sold=fit_sold,
+            fit_cost=fit_cost,
+            price_label="W. Price (manual)",
+            stock_label="Total Stock (manual)",
+        )
+
         if run_margin_model_clicked:
-            row = sumup_rows[week_idx]
+            row = selected_row
             res = evaluate_week_margin_model(
                 week=row["week"],
                 price_actual=row["weighted_price"],
@@ -974,6 +1113,23 @@ def _render_sumup_margin_model(
                 m_actual=row.get(margin_key, row["total_m"]),
                 fit_sold=fit_sold,
                 fit_cost=fit_cost,
+            )
+            target = evaluate_margin_target(
+                price_actual=row["weighted_price"],
+                stock_actual=row["total_stock"],
+                sold_actual=row.get("total_sold", float("nan")),
+                fit_sold=fit_sold,
+                fit_cost=fit_cost,
+                price_target=price_manual,
+                stock_target=stock_manual,
+            )
+            metrics = compute_margin_fit_metrics(
+                prices,
+                stocks,
+                [r.get(margin_key, r["total_m"]) for r in sumup_rows],
+                fit_sold,
+                fit_cost,
+                indices=fit_indices,
             )
             prices_grid, stocks_grid, m_grid = build_margin_surface(
                 fit_sold,
@@ -986,6 +1142,8 @@ def _render_sumup_margin_model(
             p_max_vals = compute_price_max_curve(fit_sold, fit_cost, stocks_grid)
             scope["sumup_margin_model"] = {
                 "result": res,
+                "target": target,
+                "metrics": metrics,
                 "surface": (prices_grid, stocks_grid, m_grid),
                 "stock_grid": stocks_grid,
                 "price_max_values": p_max_vals,
@@ -996,29 +1154,28 @@ def _render_sumup_margin_model(
         saved_model = scope["sumup_margin_model"]
         if saved_model:
             with st.container(border=True):
-                res = saved_model["result"]
-                rc1, rc2, rc3 = st.columns(3)
-                with rc1:
-                    st.markdown("**Actual Results**")
-                    st.metric("W. Price (actual)", _fmt(res.price_actual))
-                    st.metric("Total Stock (actual)", _fmt(res.stock_actual))
-                    st.metric("Total Margin (actual)", _fmt(res.m_actual))
-                with rc2:
-                    st.markdown("**Model at Price (actual)**")
-                    st.metric("Total Margin (model)", _fmt(res.m_model))
-                    st.metric("|dM| error", _fmt(res.m_error_abs))
-                    st.metric("Error %", _fmt(res.m_error_pct))
-                with rc3:
-                    st.markdown("**Optimisation**")
-                    st.metric("Price_max", _fmt(res.price_max), delta=f"{res.price_diff:+.2f}")
-                    st.metric("Margin surplus", _fmt(res.m_surplus))
+                _render_margin_model_results(
+                    saved_model,
+                    {
+                        "price_actual": "W. Price (actual)",
+                        "stock_actual": "Total Stock (actual)",
+                        "margin_actual": "Total Margin (actual)",
+                        "sold_actual": "Total Sold",
+                        "margin_model": "Total Margin (model)",
+                        "sold_model": "Total Sold (model)",
+                        "price_manual": "W. Price (manual)",
+                        "stock_manual": "Total Stock (manual)",
+                        "m_gain": "Margin surplus",
+                        "sold_gain": "Total Sold gain",
+                    },
+                )
 
         if saved_model:
             fig_pmax = build_price_max_curve(
                 saved_model["stock_grid"],
                 saved_model["price_max_values"],
             )
-            st.plotly_chart(fig_pmax, use_container_width=True, key=wk("sumup_pmax_curve"))
+            st.plotly_chart(fig_pmax, key=wk("sumup_pmax_curve"))
 
 
 def _parse_float(raw: str, default: float) -> float:
@@ -1186,7 +1343,7 @@ def _manual_fit_indices(
     edited = st.data_editor(
         table,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         height=360,
         key=key,
         disabled=["Week", "QW", value_label],
@@ -1249,7 +1406,6 @@ def _render_basket_detail_plot_expanders(
                 show_qw_average=show_qw_avg,
                 margin_values=plot_margin,
             ),
-            use_container_width=True,
             key=sk(f"scatter_3panel_{basket_name}_{chart_state_key}"),
         )
 
@@ -1264,7 +1420,7 @@ def _render_basket_detail_plot_expanders(
         )
         fit_cost_line_clicked = button_fit_cost_col.button(
             "Fit Line",
-            key=sk(f"btn_cost_{basket_name}"),
+            key=sk(f"fit_cost_{basket_name}_btn"),
         )
 
         plot_clmn, selection_clmn = st.columns([3, 1])
@@ -1292,7 +1448,6 @@ def _render_basket_detail_plot_expanders(
                 fitted_indices=highlight_cost,
                 show_qw_average=show_qw_avg,
             ),
-            use_container_width=True,
             key=sk(f"cost_{basket_name}_{chart_state_key}"),
         )
 
@@ -1326,7 +1481,6 @@ def _render_basket_detail_plot_expanders(
                 show_qw_average=show_qw_avg,
                 m_values=plot_margin,
             ),
-            use_container_width=True,
             key=sk(f"3d_psm_{basket_name}_{chart_state_key}"),
         )
 
@@ -1348,7 +1502,7 @@ def _render_basket_detail_plot_expanders(
         )
         fit_sold_plane_clicked = button_fit_sold_plane_col.button(
             "Fit Plane",
-            key=sk(f"btn_plane_sold_{basket_name}"),
+            key=sk(f"fit_plane_sold_{basket_name}_btn"),
         )
 
         plot_clmn, selection_clmn = st.columns([3, 1])
@@ -1374,7 +1528,6 @@ def _render_basket_detail_plot_expanders(
                 fitted_indices=highlight_s,
                 show_qw_average=show_qw_avg,
             ),
-            use_container_width=True,
             key=sk(f"3d_pss_{basket_name}_{chart_state_key}"),
         )
         if fit_sold_plane_clicked:
@@ -1392,6 +1545,7 @@ def _render_basket_detail_plot_expanders(
                 st.warning("Not enough data points to fit a plane.")
             else:
                 scope["fit_sold"][basket_name] = pf
+                scope.setdefault("fit_sold_indices", {})[basket_name] = list(fit_indices_s)
                 st.rerun()
         if fit_sold_res:
             sold_res_col, _ = st.columns([3, 1])
@@ -1414,7 +1568,6 @@ def _render_basket_detail_plot_expanders(
                 show_qw_average=show_qw_avg,
                 m_values=plot_margin,
             ),
-            use_container_width=True,
             key=sk(f"3d_pstm_{basket_name}_{chart_state_key}"),
         )
         with st.expander("**📐 Analytical Margin Optimisation Model**"):
@@ -1429,6 +1582,9 @@ def _render_basket_detail_plot_expanders(
                     scope,
                     sk,
                     m_values=plot_margin,
+                    fit_indices=(scope.get("fit_sold_indices") or {}).get(
+                        basket_name, fit_indices_s
+                    ),
                 )
             else:
                 st.info(
@@ -1463,7 +1619,7 @@ def _manual_sumup_fit_indices(
     edited = st.data_editor(
         table,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         height=360,
         key=key,
         disabled=["Week", "QW", "W. Price", "Total Stock", "Total Sold"],
@@ -1492,7 +1648,7 @@ def _manual_sumup_cost_fit_indices(
     edited = st.data_editor(
         table,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         height=360,
         key=key,
         disabled=["Week", "QW", "W. Price", "Total Cost"],
@@ -1560,6 +1716,7 @@ st.set_page_config(
     layout="wide",
 )
 apply_page_theme()
+require_login()
 
 
 def _init_state() -> None:
@@ -1755,9 +1912,9 @@ planner = render_sidebar_planner_panel(
 st.divider()
 btn1, btn2, btn3, _ = st.columns([1, 1, 1, 3])
 
-build_clicked   = btn1.button("🔨 Build Project",  type="primary",  use_container_width=True)
-kmeans_clicked  = btn2.button("🔵 K-Means",        disabled=(pbs_scope["analysis"] is None), use_container_width=True)
-octants_clicked = btn3.button("🟣 Octants",        disabled=(pbs_scope["analysis"] is None), use_container_width=True)
+build_clicked   = btn1.button("🔨 Build Project",  type="primary",  width="stretch")
+kmeans_clicked  = btn2.button("🔵 K-Means",        disabled=(pbs_scope["analysis"] is None), width="stretch")
+octants_clicked = btn3.button("🟣 Octants",        disabled=(pbs_scope["analysis"] is None), width="stretch")
 
 if pbs_scope["build_message"]:
     st.success(pbs_scope["build_message"])
@@ -1969,7 +2126,7 @@ with chart_col:
         k=result.cluster_k,
         labels=result.cluster_labels,
     )
-    st.plotly_chart(fig2d, use_container_width=True, key=sk("chart_2d"))
+    st.plotly_chart(fig2d, key=sk("chart_2d"))
 
 with insight_col:
     with st.expander("**Group Insights**", expanded=False):
@@ -2001,7 +2158,7 @@ with st.expander("🔵 3D Correlation Space", expanded=False):
         k=result.cluster_k,
         labels=result.cluster_labels,
     )
-    st.plotly_chart(fig3d_cl, use_container_width=True, key=sk("chart_3d_cluster"))
+    st.plotly_chart(fig3d_cl, key=sk("chart_3d_cluster"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ⑤ Basket Table
@@ -2080,7 +2237,7 @@ if planner_focus and "Basket" in df_table.columns:
     df_table = df_table.reset_index(drop=True)
 
 fit_ps_col, fit_pss_col, fit_cp_col, exp_col, _ = st.columns([1, 1, 1, 1, 2])
-if fit_ps_col.button("Fit Price x Sold", use_container_width=True):
+if fit_ps_col.button("Fit Price x Sold", width="stretch"):
     fitted: dict[str, Linefit] = {}
     for basket_name, ts in result.basket_data.items():
         lf = fit_line(ts.price, ts.sold)
@@ -2089,7 +2246,7 @@ if fit_ps_col.button("Fit Price x Sold", use_container_width=True):
     scope["bulk_fit_price_sold"] = fitted
     st.rerun()
 
-if fit_pss_col.button("Fit Price x Stock x Sold", use_container_width=True):
+if fit_pss_col.button("Fit Price x Stock x Sold", width="stretch"):
     fitted_planes: dict[str, Planefit] = {}
     for basket_name, ts in result.basket_data.items():
         pf = fit_plane(ts.price, ts.stock, ts.sold, method="mlr")
@@ -2098,7 +2255,7 @@ if fit_pss_col.button("Fit Price x Stock x Sold", use_container_width=True):
     scope["bulk_fit_price_stock_sold"] = fitted_planes
     st.rerun()
 
-if fit_cp_col.button("Fit Cost x Price", use_container_width=True):
+if fit_cp_col.button("Fit Cost x Price", width="stretch"):
     scope["bulk_fit_cost_price"] = fit_bulk_cost_price(
         result.basket_data,
         skip_last_points,
@@ -2142,13 +2299,13 @@ with st.expander("Combination", expanded=False):
     )
     if group_col.button(
         "Set a Job",
-        key=sk("planner_set_job_from_group"),
+        key=sk("planner_set_job_from_group_btn"),
         disabled=set_job_disabled,
         help=(
             "Create a new Job in the selected Campaign from this Group "
             "as it is now. Baskets already in other Jobs need approval."
         ),
-        use_container_width=True,
+        width="stretch",
     ):
         campaign_id = str(planner.get("selected_campaign_id") or "")
         job = add_job(
@@ -2402,7 +2559,7 @@ styled_df = (
 tbl_event = st.dataframe(
     styled_df,  # <--- Pass the styled dataframe here!
     # df_table,
-    use_container_width=True,
+    width="stretch",
     height=420,
     on_select="rerun",
     selection_mode="multi-row" if use_basket_multiselect else "single-row",
@@ -2576,7 +2733,6 @@ if len(detail_baskets) > 1:
                             overlay_values=overlay_values,
                             overlay_name=overlay_name,
                         ),
-                        use_container_width=True,
                         key=sk(
                             f"wp_chart_{spec['key']}_multi_{chart_state_key}"
                         ),
@@ -2720,7 +2876,6 @@ elif len(detail_baskets) == 1 and detail_baskets[0] in result.basket_data:
                             overlay_values=overlay_values,
                             overlay_name=overlay_name,
                         ),
-                        use_container_width=True,
                         key=sk(f"wp_chart_{spec['key']}_{basket_name}_{chart_state_key}"),
                     )
         else:
@@ -2856,7 +3011,7 @@ sumup_table_data = (
 
 edited_sumup_raw = st.data_editor(
     sumup_table_data,
-    use_container_width=True,
+    width="stretch",
     height=300,
     key=sk(f"sumup_selection_table_{scope['sumup_select_generation']}"),
     hide_index=True,
@@ -3017,15 +3172,21 @@ tb_raw_placeholder.download_button(
 )
 
 with st.expander("📊 Sum-Up Total", expanded=True):
+    su_ctrl1, su_ctrl2, su_ctrl3, _ = st.columns([1, 1, 1, 3])
+    show_su_line = su_ctrl1.toggle("Line + Symbol", value=False, key=sk("su_tog_line"))
+    show_su_qw = su_ctrl2.toggle("Colour by Quadweek", value=False, key=sk("su_tog_qw"))
+    show_su_qw_avg = su_ctrl3.toggle("QW Average", value=False, key=sk("su_tog_qw_avg"))
+    su_quadweek_by_week = {r["week"]: str(r.get("quadweek", "N/A")) for r in sumup_rows}
+
     with st.expander("📦 Stock Progress", expanded=True):
         valid_weeks  = [w for w in result.all_weeks if w in result.weekly_totals]
+        valid_quadweeks = [su_quadweek_by_week.get(w, "N/A") for w in valid_weeks]
         progress_view = st.radio(
             "Progress representation",
             ["Separate plots", "Combined multi-Y-axis plot", "Vertical Stack"],
             horizontal=True,
             key=sk("progress_view_mode"),
         )
-        show_stk = st.toggle("Line + Symbol", True, key=sk("tog_stk"))
         all_weighted_series = weighted_discount_prom_series_all(
             result.basket_data,
             valid_weeks,
@@ -3090,25 +3251,29 @@ with st.expander("📊 Sum-Up Total", expanded=True):
                             y_title=spec["y_title"],
                             marker_color=spec["marker_color"],
                             line_color=spec["line_color"],
-                            show_line=show_stk,
+                            show_line=show_su_line,
+                            quadweeks=valid_quadweeks,
+                            use_qw_colors=show_su_qw,
+                            show_qw_average=show_su_qw_avg,
                             overlay_values=spec.get("overlay_values"),
                             overlay_name=spec.get("overlay_name") or "",
                         ),
-                        use_container_width=True,
                         key=sk(f"su_wp_chart_{spec['key']}_{weight_metric}"),
                     )
         elif progress_view == "Combined multi-Y-axis plot":
             st.plotly_chart(
-                build_combined_progress(
+                build_combined_progress_qw(
                     valid_weeks,
                     stock_totals,
                     weighted_prices,
                     total_sold,
                     total_margin,
-                    show_line=show_stk,
+                    show_line=show_su_line,
                     total_margin_corrected=total_margin_corrected,
+                    quadweeks=valid_quadweeks,
+                    use_qw_colors=show_su_qw,
+                    show_qw_average=show_su_qw_avg,
                 ),
-                use_container_width=True,
                 key=sk("chart_combined_progress"),
             )
             extra_enabled = [
@@ -3125,12 +3290,14 @@ with st.expander("📊 Sum-Up Total", expanded=True):
                 )
         else:
             st.plotly_chart(
-                build_vertical_stack_from_specs(
+                build_vertical_stack_from_specs_qw(
                     valid_weeks,
                     enabled_sumup_progress,
-                    show_line=show_stk,
+                    show_line=show_su_line,
+                    quadweeks=valid_quadweeks,
+                    use_qw_colors=show_su_qw,
+                    show_qw_average=show_su_qw_avg,
                 ),
-                use_container_width=True,
                 key=sk(f"chart_stacked_progress_{weight_metric}"),
             )
     
@@ -3138,15 +3305,16 @@ with st.expander("📊 Sum-Up Total", expanded=True):
         f"📊 Total Sold vs W. Price · {sumup_margin_title} vs W. Price · {sumup_margin_title} vs Total Sold",
         expanded=False,
     ):
-        show_su_line = st.toggle("Line + Symbol", value=False, key=sk("tog_su_line"))
         st.plotly_chart(
-            build_sumup_3panel(
+            build_sumup_3panel_qw(
                 sumup_rows,
                 show_line=show_su_line,
+                use_qw_colors=show_su_qw,
+                show_qw_average=show_su_qw_avg,
                 margin_key=sumup_margin_key,
                 margin_title=sumup_margin_title,
             ),
-            use_container_width=True, key=sk("chart_su_3panel"),
+            key=sk("chart_su_3panel"),
         )
     
     with st.expander("📈 Total Cost vs W. Price"):
@@ -3158,7 +3326,7 @@ with st.expander("📊 Sum-Up Total", expanded=True):
             key=sk("scope_sumup_cost"),
             label_visibility="collapsed",
         )
-        fit_sumup_cost_clicked = button_col.button("Fit Line", key=sk("btn_line_sumup_cost"))
+        fit_sumup_cost_clicked = button_col.button("Fit Line", key=sk("fit_line_sumup_cost_btn"))
     
         plot_clmn, selection_clmn = st.columns([3, 1])
         with selection_clmn:
@@ -3174,13 +3342,14 @@ with st.expander("📊 Sum-Up Total", expanded=True):
             manual_indices_sumup_cost,
         )
         plot_clmn.plotly_chart(
-            build_sumup_cost_vs_price(
+            build_sumup_cost_vs_price_qw(
                 sumup_rows,
                 show_line=show_su_line,
+                use_qw_colors=show_su_qw,
+                show_qw_average=show_su_qw_avg,
                 linefit=fit_sumup_cost_res,
                 fitted_indices=fit_indices_sumup_cost,
             ),
-            use_container_width=True,
             key=sk("chart_sumup_cost_vs_price"),
         )
     
@@ -3206,13 +3375,15 @@ with st.expander("📊 Sum-Up Total", expanded=True):
     
     with st.expander(f"🌐 3D: W. Price × Total Sold × {sumup_margin_title}"):
         st.plotly_chart(
-            build_sumup_3d(
+            build_sumup_3d_qw(
                 sumup_rows,
                 show_line=show_su_line,
+                use_qw_colors=show_su_qw,
+                show_qw_average=show_su_qw_avg,
                 margin_key=sumup_margin_key,
                 margin_title=sumup_margin_title,
             ),
-            use_container_width=True, key=sk("chart_su_3d"),
+            key=sk("chart_su_3d"),
         )
     
     with st.expander("🌐 3D: W. Price × Total Stock × Total Sold"):
@@ -3233,7 +3404,7 @@ with st.expander("📊 Sum-Up Total", expanded=True):
         )
         fit_sumup_plane_clicked = button_fit_sumup_plane_col.button(
             "Fit Plane",
-            key=sk("btn_plane_sumup_stock_sold"),
+            key=sk("fit_plane_sumup_stock_sold_btn"),
         )
     
         plot_clmn, selection_clmn = st.columns([3, 1])
@@ -3250,13 +3421,14 @@ with st.expander("📊 Sum-Up Total", expanded=True):
             manual_indices_sumup,
         )
         plot_clmn.plotly_chart(
-            build_sumup_stock_sold_3d(
+            build_sumup_stock_sold_3d_qw(
                 sumup_rows,
                 show_line=show_su_line,
+                use_qw_colors=show_su_qw,
+                show_qw_average=show_su_qw_avg,
                 planefit=fit_sumup_res,
                 fitted_indices=fit_indices_sumup,
             ),
-            use_container_width=True,
             key=sk("chart_su_stock_sold_3d"),
         )
     
@@ -3275,6 +3447,7 @@ with st.expander("📊 Sum-Up Total", expanded=True):
                 st.warning("Not enough data points to fit a plane.")
             else:
                 scope["fit_sumup_stock_sold"] = pf
+                scope["fit_sumup_stock_sold_indices"] = list(fit_indices_sumup)
                 st.rerun()
     
         if fit_sumup_res:
@@ -3289,14 +3462,15 @@ with st.expander("📊 Sum-Up Total", expanded=True):
         saved_sumup_margin_model = scope["sumup_margin_model"]
         sumup_margin_surface = saved_sumup_margin_model["surface"] if saved_sumup_margin_model else None
         st.plotly_chart(
-            build_sumup_stock_m_3d(
+            build_sumup_stock_m_3d_qw(
                 sumup_rows,
                 show_line=show_su_line,
+                use_qw_colors=show_su_qw,
+                show_qw_average=show_su_qw_avg,
                 margin_surface=sumup_margin_surface,
                 margin_key=sumup_margin_key,
                 margin_title=sumup_margin_label,
             ),
-            use_container_width=True,
             key=sk("chart_su_stock_m_3d"),
         )
     
@@ -3307,6 +3481,7 @@ with st.expander("📊 Sum-Up Total", expanded=True):
                 _render_sumup_margin_model(
                     sumup_rows, fit_sold_ok, fit_cost_ok, scope, sk,
                     margin_key=sumup_margin_key,
+                    fit_indices=scope.get("fit_sumup_stock_sold_indices") or fit_indices_sumup,
                 )
             else:
                 st.info(
@@ -3335,7 +3510,7 @@ if scope["selected_week"] and scope["selected_week"] in result.weekly_totals:
                 data=df_week_detail.to_csv(index=False).encode(),
                 file_name=f"weekly_detail_{selected_week}.csv",
                 mime="text/csv",
-                key=sk(f"week_detail_export_{selected_week}"),
+                key=sk(f"week_detail_export_{selected_week}_btn"),
                 help="Export all basket rows for this week (raw numeric values).",
             )
             week_detail_display = (
@@ -3345,7 +3520,7 @@ if scope["selected_week"] and scope["selected_week"] in result.weekly_totals:
             )
             st.dataframe(
                 week_detail_display,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 key=sk(f"week_detail_table_{selected_week}"),
             )
@@ -3399,7 +3574,7 @@ if scope["selected_week"] and scope["selected_week"] in result.weekly_totals:
                 group_filter=selected_group,
                 show_line=show_wk_line,
             ),
-            use_container_width=True, key=sk(f"chart_wk_{scope['selected_week']}"),
+            key=sk(f"chart_wk_{scope['selected_week']}"),
         )
     
         with st.expander("🌐 3D Overview: Price × Sold × M"):
@@ -3413,7 +3588,6 @@ if scope["selected_week"] and scope["selected_week"] in result.weekly_totals:
                     color_by_group=color_grp,
                     group_filter=selected_group,
                 ),
-                use_container_width=True,
                 key=sk(f"chart_wk_3d_{scope['selected_week']}"),
             )
     
@@ -3428,7 +3602,6 @@ if scope["selected_week"] and scope["selected_week"] in result.weekly_totals:
                     color_by_group=color_grp,
                     group_filter=selected_group,
                 ),
-                use_container_width=True,
                 key=sk(f"chart_wk_stock_sold_3d_{scope['selected_week']}"),
             )
     
@@ -3443,6 +3616,5 @@ if scope["selected_week"] and scope["selected_week"] in result.weekly_totals:
                     color_by_group=color_grp,
                     group_filter=selected_group,
                 ),
-                use_container_width=True,
                 key=sk(f"chart_wk_stock_m_3d_{scope['selected_week']}"),
             )

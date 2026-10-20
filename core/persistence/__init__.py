@@ -1,5 +1,12 @@
 """Project session persistence (.disc_proj)."""
 
+from core.persistence.gdrive import (
+    DriveClientError,
+    DriveConfig,
+    DriveStore,
+    open_drive_store,
+    parse_drive_config,
+)
 from core.persistence.project_io import (
     PROJECT_EXTENSION,
     PROJECT_FORMAT_VERSION,
@@ -11,6 +18,11 @@ from core.persistence.project_io import (
 )
 
 __all__ = [
+    "DriveClientError",
+    "DriveConfig",
+    "DriveStore",
+    "open_drive_store",
+    "parse_drive_config",
     "PROJECT_EXTENSION",
     "PROJECT_FORMAT_VERSION",
     "apply_project_payload",

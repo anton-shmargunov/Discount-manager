@@ -1,0 +1,4 @@
+flow_id,label,categories,strategies_file,week_discount_categories
+A-used,Used A,In;Out;OutByCondition;OutByMinPrice;Aggregated,,In;Out;OutByCondition;OutByMinPrice
+B-used,Used B,,,Aggregated
+NEW,New,,,Aggregated

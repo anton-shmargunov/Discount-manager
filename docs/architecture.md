@@ -41,14 +41,22 @@ PBA.v.1.250525/
 ├── ui/                             # Reusable Streamlit sections (no analytics)
 │   ├── product_bs_scope.py         # Per-mode/category session isolation
 │   ├── week_discount_ui.py         # Week Discount UI (strategy, table, exports)
+│   ├── week_discount_exports.py    # Export bytes rebuilt from session (no widgets)
+│   ├── release_ui.py               # Release dialog, released-history default
+│   ├── flow_ui.py                  # Flow start screen, sidebar, switch / create
 │   ├── planner_ui.py               # Sidebar Planner (Campaign / Job) + conflict dialog
 │   ├── auth_gate.py                # Login / password gate (require_login)
+│   ├── gdrive_secrets.py           # Read [gdrive] from st.secrets
 │   └── project_save_ui.py          # Sidebar Project save / restore (.disc_proj)
 │
 ├── core/                           # Pure analytical engine
 │   ├── models.py                   # Dataclasses: BasketTimeSeries, BasketResult, …
+│   ├── flows.py                    # Flow registry, validation, creation (no Streamlit)
 │   ├── persistence/
-│   │   └── project_io.py           # .disc_proj pack / unpack / apply (no Streamlit)
+│   │   ├── project_io.py           # .disc_proj pack / unpack / apply (no Streamlit)
+│   │   ├── file_naming.py          # <kind>_<flow>_<tag>_<week>_rNN[_rlsd] build / parse
+│   │   ├── flow_storage.py         # Flow/week folders, revisioned saves, release mark
+│   │   └── gdrive.py               # Drive folders / upload / rename (no Streamlit)
 │   ├── security/
 │   │   └── passwords.py            # PBKDF2 hash / verify, login throttle
 │   ├── analytics/
@@ -84,18 +92,21 @@ PBA.v.1.250525/
 │
 ├── configs/
 │   ├── settings.py                 # App constants, paths, cluster colors
+│   ├── flows.csv                   # Seed flows (categories, Week Discount files on release)
 │   ├── theme_bootstrap.py          # Light-theme CSS injection
 │   └── strategies/
 │       └── strategies.v1.csv       # Discount strategy defaults (prom reserved)
 │
 ├── inputs/                         # Sample CSVs and canonical basket list (625)
 ├── scripts/
-│   └── hash_password.py            # Prints a secrets.toml entry for one user
+│   ├── hash_password.py            # Prints a secrets.toml entry for one user
+│   └── gdrive_oauth.py             # One-time Google sign-in; prints [gdrive] secrets
 ├── tests/
 │   └── test_e2e.py                 # End-to-end smoke tests
 ├── docs/
 │   ├── architecture.md             # This file
-│   └── user-manual.md
+│   ├── user-manual.md
+│   └── gdrive-setup.md             # Google Drive secrets / OAuth script
 │
 ├── CHANGELOG.md                    # Main updates by version
 ├── requirements.txt
@@ -356,7 +367,10 @@ UI lives in the Week Discount **Export** expander. Buttons are disabled while Ed
 |---------------|------------------|--------|
 | **Week Discount** | `normalize_week_discount_export_rows`, `expand_week_discount_export_rows` | Visible columns for the current category |
 | **Discount history. Current** | `build_discount_hist_export_rows`, `advance_discount_hist_week_metadata`, `merge_discount_hist_export` | Current Product BS category (report mode: Aggregated) |
-| **Discount history. All** | `iter_built_product_bs_scopes` + `combine_discount_hist_export_by_category` | product_BS modes only; every **built** category in this session |
+| **Discount history. All** | `ui/week_discount_exports.discount_hist_all_csv` (`combine_discount_hist_export_by_category`) | product_BS modes only; every **built** category in this session |
+| **Release…** | `ui/release_ui.py` | See [Flows, revisions and releases](#flows-revisions-and-releases) |
+
+`ui/week_discount_exports.py` rebuilds export bytes from session state without widgets, so the Export row, **Project → Save** and **Release** produce the same files: `category_week_discount_csv` (a category's rows with its own column toggles `WEEK_DISCOUNT_VIEW_TOGGLES` and **Include 'no stock'**), `discount_hist_category_csv`, `discount_hist_all_csv`, `built_categories`. Table Filters are applied only to the current category's on-screen download. In report mode, ALL history is the single scope's history.
 
 Discount-history exports end with four Planner columns: `campaign_id`, `campaign_name`, `job_id`, `job_name`.
 
@@ -409,8 +423,11 @@ Sidebar expander **Project** (above **Log**). Format: magic `PBA1DISC` + gzip pi
 
 | Action | Behaviour |
 |--------|-----------|
-| **Save…** | Dialog for filename → download snapshot |
+| **Save…** | Dialog: tag (default `ALL`, or the current category), file name, **discount_history** checkbox (on). Downloads the project and the history; **Save to Drive** writes both as one revision (`project_save_items` → `save_set`, not released) |
 | **Restore** | File uploader (`type=["disc_proj"]`) then **Restore** |
+| **Restore from Drive** | Lists the current flow's `.disc_proj` files (released first); same restore path as an upload |
+
+Projects are stamped with `flow_id`; `check_project_flow` refuses a project of another flow (also judged by legacy file names).
 
 Payload: `format`, `version`, `saved_at`, `ui` (picklable session keys), `scopes` (`_pbs_scopes` including `analysis`, `discount_hist_df` and `planner`), `log_messages`.
 
@@ -465,6 +482,22 @@ Restore applies **before** widgets render (`apply_pending_project_restore()`). W
 ### `core/persistence/project_io.py`
 
 `.disc_proj` snapshot: `build_project_payload`, `pack_project_bytes`, `unpack_project_bytes`, `apply_project_payload`. Must not import Streamlit.
+
+### `core/persistence/gdrive.py`
+
+Drive folders / upload / list / download / rename using a refresh token. `DriveStore` accepts a `DriveClient` (live `GoogleDriveClient` or `InMemoryDriveClient` in tests). Only folders reached from `root_folder_id` are allowed; uploads refuse existing names. On Windows the live client uses a CA bundle of `certifi` plus the Windows certificate store (`windows_ca_bundle`), because `httplib2` ignores the system store. Credentials come from `st.secrets['gdrive']` via `ui/gdrive_secrets.py`. Setup: `docs/gdrive-setup.md`.
+
+### Flows, revisions and releases
+
+**Flows** (`core/flows.py`, `ui/flow_ui.py`): after login, `require_flow()` shows the start screen until a flow is chosen (`_flow_id`). With Drive, every folder under the root with a `flow.json` is a flow; `configs/flows.csv` seeds the list (and is the only source without Drive). `Flow` holds `categories` (offered Product BS categories) and `week_discount_categories` (ticked by default in Release → ALL: A-used `In;Out;OutByCondition;OutByMinPrice`, B-used / NEW `Aggregated`). A `flow.json` without `week_discount_categories` falls back to the seed. Switching flow clears the session except `_auth_*` and the Drive store.
+
+**Names** (`file_naming.py`): `<kind>_<flow>[_<tag>]_<week>_r<NN>[_rlsd].<ext>`, kinds `discount_project`, `week_discount`, `discount_hist`. Projects and Week Discount use the analysed week W; history uses W+1. `OutByCondition` / `OutByMinPrice` are written `ByCondition` / `ByMinPrice` (`file_tag`) and parsed back (`normalize_tag`). Legacy names are parsed too.
+
+**Storage** (`flow_storage.py`): `<flow>/<week>/{input, proj, week_discount, discount_history}`. `save_set` gives every file of a set the same next revision (per flow and week folder), uploads, then with `release=True` renames the new files to `_rlsd` and removes the mark from the previous released file of the same kind and tag. If two released files exist, the highest revision wins.
+
+**Release** (`ui/release_ui.py`): category set = project, Week Discount, Discount history. Current; ALL set = project ALL, Discount history. All, plus `week_discount_<category>` for every category ticked in the **Week discount** expander (unbuilt categories disabled). Without Drive the set downloads as a zip with `_rlsd` names. Next week, `render_released_history_option` offers the latest released history (ALL, then the category, then untagged).
+
+Session keys `_auth_*`, `_flow_*`, `_gdrive_*`, `_release_*` are never written to `.disc_proj` and are protected on restore.
 
 ### `core/analytics/basket_analysis.py`
 
@@ -547,6 +580,10 @@ python tests/test_e2e.py
 - Planner: membership, conflicts, generate-all; discount-history Planner columns
 - Margin-model metrics and manual target point
 - Password hashing / verification, login throttle, `_auth_*` keys excluded from `.disc_proj`
+- Google Drive in-memory store: root-tree restriction, no overwrite, `_gdrive_*` / `_flow_*` / `_release_*` skipped on save
+- File naming (short tags, revisions, `_rlsd`, legacy names), flow registry and creation (`week_discount_categories`)
+- Revisioned saves and release mark; release sets (category, ALL with Week Discount files), Project Save set, zip names
+- Export builders on a real analysis (`built_categories`, `category_week_discount_csv`, `discount_hist_all_csv`)
 
 pytest is not installed; the file runs as a script. Compile check: `python -m py_compile <file>`.
 
@@ -563,7 +600,7 @@ pytest is not installed; the file runs as a script. Compile check: `python -m py
 | GitHub | https://github.com/anton-shmargunov/Discount-manager |
 | Python | 3.9+ locally (tested on 3.9.13); **3.12** on Cloud |
 | Streamlit | `>=1.49` (needs `width="stretch"` on buttons, `dataframe`, `data_editor`) |
-| Secrets | `[app_users]` login entries (see [Access control](#access-control)). Add them on Cloud **before** pushing, or the page is locked |
+| Secrets | `[app_users]` login entries (see [Access control](#access-control)). Optional `[gdrive]` for Drive save/restore (`docs/gdrive-setup.md`). Add `[app_users]` on Cloud **before** pushing, or the page is locked |
 
 Each Cloud app redeploys (~1 minute) when its branch is pushed: the main app from `main`, the test app from `v1-1-test_1`.
 
@@ -614,6 +651,7 @@ UI extraction continues incrementally (`ui/week_discount_ui.py` is the pattern f
 - [user-manual.md](user-manual.md) — operator guide
 - [README.md](../README.md) — quick start
 - [CHANGELOG.md](../CHANGELOG.md) — main updates by version
+- [gdrive-setup.md](gdrive-setup.md) — Drive refresh-token secrets and OAuth script
 - `handoff_261008.md` — latest developer handoff (Planner, Cloud restore, margin-model table, Sum-up toggles)
 - `handoff_260912.md` — Project save, all-BS export
 - `handoff_260623.md` — Week Discount edit/export, Cloud deploy

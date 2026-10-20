@@ -54,7 +54,14 @@ from core.analytics.planner import (
     focused_baskets,
     get_campaign,
 )
+from core.flows import flow_category_options
 from ui.auth_gate import require_login
+from ui.flow_ui import current_category_tag, render_flow_caption, require_flow
+from ui.release_ui import (
+    load_released_history,
+    render_released_history_option,
+    warn_foreign_flow_uploads,
+)
 from ui.week_discount_ui import render_week_discount_section
 from ui.project_save_ui import apply_pending_project_restore, render_sidebar_project_panel
 from ui.planner_ui import begin_job_assignment, render_sidebar_planner_panel
@@ -1716,7 +1723,9 @@ st.set_page_config(
     layout="wide",
 )
 apply_page_theme()
-require_login()
+current_user = require_login()
+current_flow_obj = require_flow(current_user)
+flow_category_choices = flow_category_options(current_flow_obj, PRODUCT_BS_CATEGORY_OPTIONS)
 
 
 def _init_state() -> None:
@@ -1731,6 +1740,8 @@ def _init_state() -> None:
 _init_state()
 ss = st.session_state
 apply_pending_project_restore()
+if ss.get("fi_product_bs_category") not in flow_category_choices:
+    ss["fi_product_bs_category"] = flow_category_choices[0]
 
 with st.sidebar:
     render_sidebar_project_panel()
@@ -1740,6 +1751,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.title("📊 Correlation & Group Analysis")
+render_flow_caption()
 st.caption(
     "Upload datasets to calculate correlations between Sold, Avg Price, and Margin. "
     "Baskets are clustered into groups. **Click any table row to drill into weekly data.**"
@@ -1797,6 +1809,11 @@ file_discount_hist = st.file_uploader(
     key="fu_discount_hist",
     accept_multiple_files=True,
     help=discount_hist_help,
+)
+warn_foreign_flow_uploads([file_tracking, *(file_discount_hist or [])])
+released_hist_choice = render_released_history_option(
+    current_category_tag(ss) if input_mode in PRODUCT_BS_INPUT_MODES else AGGREGATED_DISCOUNT_HIST_CATEGORY,
+    file_discount_hist,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1889,7 +1906,7 @@ if input_mode in PRODUCT_BS_INPUT_MODES:
     st.markdown("**Product BS Category**")
     product_bs_category = st.selectbox(
         "Product BS Category",
-        PRODUCT_BS_CATEGORY_OPTIONS,
+        flow_category_choices,
         index=0,
         label_visibility="collapsed",
         key="fi_product_bs_category",
@@ -1941,6 +1958,12 @@ if build_clicked:
                 targeted_filters = _parse_level_filter_values(
                     filter_store[FILTER_LEVEL_TARGETED]
                 )
+                hist_files = list(file_discount_hist or [])
+                if not hist_files and released_hist_choice:
+                    hist_files = [load_released_history(released_hist_choice)]
+                    log_lines.append(
+                        f"Discount history: released file {released_hist_choice['name']}"
+                    )
                 if input_mode == TRACKING_REPORT_MODE:
                     df_report = pd.read_csv(io.BytesIO(file_tracking.read()))
                     log_lines.append(f"TrackingBaskets rows uploaded: {len(df_report)}")
@@ -1951,7 +1974,7 @@ if build_clicked:
                     )
                     pbs_scope["discount_hist_df"] = _apply_optional_discount_hist(
                         analysis.basket_data,
-                        file_discount_hist,
+                        hist_files or None,
                         AGGREGATED_DISCOUNT_HIST_CATEGORY,
                         log_lines,
                     )
@@ -1973,11 +1996,23 @@ if build_clicked:
                     log_lines.extend(parser_warnings)
                     pbs_scope["discount_hist_df"] = _apply_optional_discount_hist(
                         analysis.basket_data,
-                        file_discount_hist,
+                        hist_files or None,
                         product_bs_category,
                         log_lines,
                     )
                 pbs_scope["analysis"] = analysis
+                pbs_scope["inputs"] = {
+                    "report": str(getattr(file_tracking, "name", "") or ""),
+                    "discount_hist": [str(getattr(item, "name", "") or "") for item in hist_files],
+                }
+                if released_hist_choice and not file_discount_hist:
+                    hist_week = str(released_hist_choice.get("week") or "")
+                    latest_week = str(max(analysis.all_weeks)) if analysis.all_weeks else ""
+                    if hist_week and latest_week and hist_week != latest_week:
+                        log_lines.append(
+                            f"Warning: released history is for week {hist_week}; "
+                            f"the report ends at week {latest_week}."
+                        )
                 clear_product_bs_scope_derived(pbs_scope)
                 log_lines.append("Filter levels: General and Targeted (both applied)")
                 log_lines.extend(_analysis_log_lines(analysis))

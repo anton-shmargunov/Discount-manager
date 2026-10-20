@@ -37,8 +37,8 @@ _SKIP_KEY_PREFIXES = (
     "UploadFile",
 )
 
-# Login state: never written to a project file and never set by a restore.
-_NEVER_PERSIST_PREFIXES = ("_auth_",)
+# Login, flow and Drive state: never written to a project file and never set by a restore.
+_NEVER_PERSIST_PREFIXES = ("_auth_", "_flow_", "_gdrive_", "_release_")
 
 # Streamlit forbids assigning session_state for button / download_button /
 # form_submit_button keys. Every such key must end with this suffix; the
@@ -115,9 +115,15 @@ class _ProjectUnpickler(pickle.Unpickler):
             raise
 
 
+# st.data_editor keeps its edits as a plain dict with these keys.
+_DATA_EDITOR_STATE_KEYS = frozenset({"edited_rows", "added_rows", "deleted_rows"})
+
+
 def _is_streamlit_widget_state(value: object) -> bool:
     """Data editor / dataframe selection states cannot be written back to session_state."""
     if isinstance(value, UnavailableWidgetState):
+        return True
+    if isinstance(value, dict) and _DATA_EDITOR_STATE_KEYS <= set(value.keys()):
         return True
     return type(value).__module__.split(".")[0] == "streamlit"
 

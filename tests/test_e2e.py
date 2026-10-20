@@ -1649,6 +1649,20 @@ def main():
     finally:
         delattr(data_editor_mod, "LiveEditorState")
 
+    editor_key = "pbs::scope::manual_cost_set::36d8a52c68438094"
+    editor_state = {"edited_rows": {2: {"Select": False}}, "added_rows": [], "deleted_rows": []}
+    editor_src = _FakeSession()
+    editor_src.log_messages = []
+    editor_src[editor_key] = editor_state
+    editor_src.fi_k = 4
+    assert editor_key not in build_project_payload(editor_src)["ui"]
+    old_payload = build_project_payload(editor_src)
+    old_payload["ui"][editor_key] = editor_state
+    editor_dest = _FakeSession()
+    editor_dest.log_messages = []
+    apply_project_payload(editor_dest, unpack_project_bytes(pack_project_bytes(old_payload)))
+    assert editor_key not in editor_dest and editor_dest.fi_k == 4
+
     button_keys = [
         "pbs::scope::planner_add_campaign_btn",
         "pbs::scope::planner_delete_campaign_btn",
@@ -1695,6 +1709,381 @@ def main():
     auth_dest["_auth_user"] = "anton"
     apply_project_payload(auth_dest, forged_payload)
     assert auth_dest["_auth_user"] == "anton"
+
+    print("\nGoogle Drive store (in-memory)...")
+    from core.persistence.gdrive import (
+        DriveClientError,
+        DriveStore,
+        InMemoryDriveClient,
+        parse_drive_config,
+        safe_drive_filename,
+    )
+
+    assert parse_drive_config(None) is None
+    assert parse_drive_config({"client_id": "x"}) is None
+    gd_cfg = parse_drive_config({
+        "client_id": "cid",
+        "client_secret": "csec",
+        "refresh_token": "rtok",
+        "root_folder_id": "ROOT",
+    })
+    assert gd_cfg is not None and gd_cfg.root_folder_id == "ROOT"
+    assert safe_drive_filename("a/b\\c.disc_proj") == "a_b_c.disc_proj"
+
+    mem = InMemoryDriveClient()
+    store = DriveStore(gd_cfg, mem)
+    proj_f = store.folder_path(["A-used", "2026-40", "proj"], create=True)
+    assert store.folder_path(["A-used", "2026-40", "proj"], create=False) == proj_f
+    first = store.upload_bytes(proj_f, "snap.disc_proj", b"one")
+    try:
+        store.upload_bytes(proj_f, "snap.disc_proj", b"two")
+        raise AssertionError("existing names must not be overwritten")
+    except DriveClientError:
+        pass
+    assert store.download_file(proj_f, first.id) == b"one"
+    assert store.rename_file(proj_f, first.id, "snap_rlsd.disc_proj").name == "snap_rlsd.disc_proj"
+    listed = store.list_files(proj_f, name_suffix=".disc_proj")
+    assert [item.name for item in listed] == ["snap_rlsd.disc_proj"]
+    try:
+        store.upload_bytes("otherF", "x.csv", b"no")
+        raise AssertionError("folders outside the root tree must be rejected")
+    except DriveClientError:
+        pass
+    outsider = mem.create_file("otherF", "stolen.disc_proj", b"xx", "application/octet-stream")
+    try:
+        store.download_file(proj_f, outsider.id)
+        raise AssertionError("foreign file must be rejected")
+    except DriveClientError:
+        pass
+    mem.create_folder("ROOT", "A-used")
+    assert store.find_subfolder("ROOT", "A-used") == store.folder_path(["A-used"], create=False)
+    assert store.warnings and "oldest" in store.warnings[-1]
+    store.warnings.clear()
+
+    gd_session = _FakeSession()
+    gd_session.log_messages = ["Ready."]
+    gd_session["_gdrive_store"] = store
+    gd_session["_flow_id"] = "A-used"
+    gd_session["_gdrive_released_hist"] = {"x": {}}
+    gd_session["_release_set_kind"] = "all"
+    gd_session["fi_k"] = 5
+    gd_ui = build_project_payload(gd_session)["ui"]
+    assert not any(key.startswith(("_gdrive_", "_flow_", "_release_")) for key in gd_ui)
+    assert gd_ui["fi_k"] == 5
+
+    print("\nFile naming (flows, revisions, release mark)...")
+    from core.persistence.file_naming import (
+        KIND_DISCOUNT_HIST,
+        KIND_PROJECT,
+        KIND_WEEK_DISCOUNT,
+        build_name,
+        foreign_flow_tags,
+        next_revision,
+        parse_name,
+        released_matches,
+        released_variant,
+    )
+
+    rel_name = build_name(KIND_PROJECT, "A-used", "In", "2026-40", 3, released=True)
+    assert rel_name == "discount_project_A-used_In_2026-40_r03_rlsd.disc_proj"
+    parsed_rel = parse_name(rel_name)
+    assert (parsed_rel.flow_id, parsed_rel.tag, parsed_rel.week, parsed_rel.revision, parsed_rel.released) == (
+        "A-used", "In", "2026-40", 3, True,
+    )
+    assert released_variant(rel_name, False) == "discount_project_A-used_In_2026-40_r03.disc_proj"
+    assert build_name(KIND_DISCOUNT_HIST, "B-used", "", "2026-41") == "discount_hist_B-used_2026-41.csv"
+    short_name = build_name(KIND_WEEK_DISCOUNT, "A-used", "OutByCondition", "2026-40", 2, released=True)
+    assert short_name == "week_discount_A-used_ByCondition_2026-40_r02_rlsd.csv"
+    assert parse_name(short_name).tag == "OutByCondition"
+    assert build_name(KIND_DISCOUNT_HIST, "A-used", "OutByMinPrice", "2026-41") == (
+        "discount_hist_A-used_ByMinPrice_2026-41.csv"
+    )
+    assert released_matches(
+        [short_name], kind=KIND_WEEK_DISCOUNT, flow_id="A-used", tag="OutByCondition",
+    ) == [short_name]
+    assert released_variant(
+        "week_discount_A-used_OutByCondition_2026-40_r01_rlsd.csv", False,
+    ) == "week_discount_A-used_OutByCondition_2026-40_r01.csv"
+    legacy_hist = parse_name("discount_hist_2026-41_A-used_ByCondition.csv")
+    assert legacy_hist.legacy and legacy_hist.flow_id == "A-used" and legacy_hist.tag == "OutByCondition"
+    legacy_proj = parse_name("discount_project_A-used_ALL_40_9.disc_proj")
+    assert legacy_proj.legacy and legacy_proj.tag == "ALL" and legacy_proj.revision == 9
+    all_bs = parse_name("discount_hist_all_bs_2026-41.csv")
+    assert all_bs.flow_id is None and all_bs.tag == "ALL"
+    assert parse_name("week_discount_2026-38 B-used.csv").flow_id == "B-used"
+    assert parse_name("notes.csv") is None
+    week_names = [
+        "discount_project_A-used_In_2026-40_r01.disc_proj",
+        "week_discount_A-used_In_2026-40_r02_rlsd.csv",
+        "discount_hist_A-used_In_2026-41_r04_rlsd.csv",
+        "discount_hist_A-used_In_2026-41_r02_rlsd.csv",
+        "discount_project_A-used_In_40_9.disc_proj",
+    ]
+    assert next_revision(week_names) == 5
+    assert released_matches(week_names, kind=KIND_DISCOUNT_HIST, flow_id="A-used", tag="In") == [
+        "discount_hist_A-used_In_2026-41_r04_rlsd.csv",
+        "discount_hist_A-used_In_2026-41_r02_rlsd.csv",
+    ]
+    flow_list = ["A-used", "B-used", "NEW"]
+    assert foreign_flow_tags("discount_hist_2026-40_B-used.csv", "A-used", flow_list) == ["B-used"]
+    assert foreign_flow_tags(
+        "data - 2026-10-06T194241.487.A-used.26_17-26_40.PRODUCTBS.csv", "A-used", flow_list
+    ) == []
+    assert foreign_flow_tags("discount_hist_2026-40.csv", "A-used", flow_list) == []
+
+    print("\nFlows registry and creation...")
+    from core.flows import (
+        Flow,
+        check_project_flow,
+        create_flow,
+        flow_category_options,
+        list_drive_flows,
+        load_seed_flows,
+        merge_flows,
+        validate_flow_id,
+    )
+
+    seed_flows = load_seed_flows()
+    assert [flow.flow_id for flow in seed_flows] == ["A-used", "B-used", "NEW"]
+    assert validate_flow_id("C-used") is None
+    assert validate_flow_id("a-used", ["A-used"]) is not None
+    assert validate_flow_id("1abc") is not None
+    assert validate_flow_id("x") is not None
+    assert validate_flow_id("bad_name") is not None
+    assert validate_flow_id("ALL") is not None
+    assert flow_category_options(Flow("B", categories=("Out",)), ["Aggregated", "In", "Out"]) == ["Out"]
+    assert flow_category_options(Flow("B"), ["Aggregated", "In"]) == ["Aggregated", "In"]
+    seed_wd = {flow.flow_id: flow.week_discount_categories for flow in seed_flows}
+    assert seed_wd == {
+        "A-used": ("In", "Out", "OutByCondition", "OutByMinPrice"),
+        "B-used": ("Aggregated",),
+        "NEW": ("Aggregated",),
+    }
+    wd_flow = Flow("E", week_discount_categories=("In", "Out"))
+    assert Flow.from_meta(wd_flow.to_meta()).week_discount_categories == ("In", "Out")
+    assert Flow.from_meta(wd_flow.to_session()).week_discount_categories == ("In", "Out")
+    assert Flow.from_meta({"flow_id": "E", "week_discount_categories": "In;Out"}).week_discount_categories == (
+        "In", "Out",
+    )
+
+    flow_mem = InMemoryDriveClient()
+    flow_store = DriveStore(gd_cfg, flow_mem)
+    created = create_flow(
+        flow_store, "C-used", "Used C", ["Out"],
+        week_discount_categories=["Out"],
+        existing_ids=[flow.flow_id for flow in seed_flows], created_by="anton",
+    )
+    assert created.folder_id and created.categories == ("Out",)
+    assert created.week_discount_categories == ("Out",)
+    try:
+        create_flow(flow_store, "c-used", "dup", [])
+        raise AssertionError("duplicate flow ids must be refused")
+    except ValueError:
+        pass
+    flow_store.folder_path(["A-used", "2026-39"], create=True)
+    flow_store.folder_path(["A-used", "2026-40"], create=True)
+    flow_store.folder_path(["_shared"], create=True)
+    flow_store.folder_path(["Random"], create=True)
+    drive_flows = list_drive_flows(flow_store, seed_flows)
+    by_id = {flow.flow_id: flow for flow in drive_flows}
+    assert set(by_id) == {"A-used", "C-used"}
+    assert by_id["A-used"].last_week == "2026-40" and by_id["C-used"].label == "Used C"
+    assert by_id["C-used"].week_discount_categories == ("Out",)
+    assert by_id["A-used"].week_discount_categories == seed_wd["A-used"]
+    merged = merge_flows(seed_flows, drive_flows)
+    assert [flow.flow_id for flow in merged] == ["A-used", "B-used", "NEW", "C-used"]
+    session_flow = create_flow(None, "D-new", "", [], existing_ids=["A-used"])
+    assert session_flow.source == "session" and session_flow.label == "D-new"
+
+    assert check_project_flow({"flow_id": "A-used"}, "A-used") is None
+    try:
+        check_project_flow({"flow_id": "B-used"}, "A-used")
+        raise AssertionError("other-flow projects must be refused")
+    except ValueError:
+        pass
+    assert "before flows" in check_project_flow({}, "A-used", filename="snap.disc_proj")
+    try:
+        check_project_flow(
+            {}, "A-used", filename="discount_project_B-used_40.disc_proj", known_flow_ids=flow_list,
+        )
+        raise AssertionError("legacy file of another flow must be refused")
+    except ValueError:
+        pass
+
+    print("\nRevisioned saves and release mark...")
+    from core.persistence.flow_storage import (
+        FlowStorage,
+        SetItem,
+        history_tag_preference,
+        save_set,
+    )
+
+    storage = FlowStorage(flow_store, "C-used")
+    cat_set = [
+        SetItem(KIND_PROJECT, "Out", "2026-40", b"p"),
+        SetItem(KIND_WEEK_DISCOUNT, "Out", "2026-40", b"w"),
+        SetItem(KIND_DISCOUNT_HIST, "Out", "2026-41", b"h"),
+    ]
+    plain = save_set(storage, "2026-40", cat_set[:1])
+    assert plain.revision == 1 and plain.names == ["discount_project_C-used_Out_2026-40_r01.disc_proj"]
+    rel2 = save_set(storage, "2026-40", cat_set, release=True)
+    assert rel2.revision == 2 and all(name.endswith(("_r02_rlsd.csv", "_r02_rlsd.disc_proj")) for name in rel2.names)
+    assert rel2.unreleased == []
+    rel3 = save_set(
+        storage, "2026-40",
+        [SetItem(KIND_PROJECT, "Out", "2026-40", b"p3"),
+         SetItem(KIND_WEEK_DISCOUNT, "Out", "2026-40", b"w3"),
+         SetItem(KIND_DISCOUNT_HIST, "Out", "2026-41", b"h3")],
+        release=True,
+    )
+    assert rel3.revision == 3 and len(rel3.unreleased) == 3
+    names_40 = storage.week_names("2026-40")
+    assert sum(1 for name in names_40 if name.endswith(("_rlsd.csv", "_rlsd.disc_proj"))) == 3
+    assert "discount_hist_C-used_Out_2026-41_r02.csv" in names_40
+    all_rel = save_set(
+        storage, "2026-40",
+        [SetItem(KIND_PROJECT, "ALL", "2026-40", b"pa"),
+         SetItem(KIND_DISCOUNT_HIST, "ALL", "2026-41", b"ha")],
+        release=True,
+    )
+    assert all_rel.revision == 4 and all_rel.unreleased == []
+    best_hist = storage.find_released_history(history_tag_preference("Out"))
+    assert best_hist.name == "discount_hist_C-used_ALL_2026-41_r04_rlsd.csv"
+    assert storage.download(best_hist) == b"ha"
+    out_only = storage.find_released_history(["Out"])
+    assert out_only.name == "discount_hist_C-used_Out_2026-41_r03_rlsd.csv"
+    projects = storage.list_projects()
+    assert projects[0].released and projects[-1].name.endswith("_r01.disc_proj")
+    newer = save_set(storage, "2026-41", [SetItem(KIND_PROJECT, "Out", "2026-41", b"n")])
+    assert newer.revision == 1
+    late = save_set(
+        storage, "2026-40",
+        [SetItem(KIND_PROJECT, "Out", "2026-40", b"p5"),
+         SetItem(KIND_WEEK_DISCOUNT, "Out", "2026-40", b"w5"),
+         SetItem(KIND_DISCOUNT_HIST, "Out", "2026-41", b"h5")],
+        release=True,
+    )
+    assert late.revision == 5 and any("newer week" in warning for warning in late.warnings)
+
+    from ui.project_save_ui import project_save_items
+    from ui.release_ui import (
+        SET_ALL,
+        SET_CATEGORY,
+        release_set_items,
+        release_zip_bytes,
+        week_discount_choices,
+        week_discount_defaults,
+    )
+    from ui.week_discount_exports import (
+        HistExport,
+        built_categories,
+        category_week_discount_csv,
+        discount_hist_all_csv,
+        discount_hist_category_csv,
+    )
+
+    rel_parts = {"week_discount": b"w", "hist_current": b"h", "hist_all": None, "next_week": "2026-41"}
+    cat_items = release_set_items(SET_CATEGORY, "In", "2026-40", rel_parts, b"p")
+    assert [(item.kind, item.tag, item.name_week) for item in cat_items] == [
+        (KIND_PROJECT, "In", "2026-40"),
+        (KIND_WEEK_DISCOUNT, "In", "2026-40"),
+        (KIND_DISCOUNT_HIST, "In", "2026-41"),
+    ]
+    try:
+        release_set_items(SET_ALL, "In", "2026-40", rel_parts, b"p")
+        raise AssertionError("ALL set needs the combined history")
+    except ValueError:
+        pass
+    try:
+        release_set_items(SET_CATEGORY, "In", "2026-40", {**rel_parts, "week_discount": None}, b"p")
+        raise AssertionError("incomplete category set must be refused")
+    except ValueError:
+        pass
+    all_parts = {
+        "next_week": "2026-41",
+        "hist_all": b"ha",
+        "week_discounts": {"In": b"wi", "OutByCondition": b"wc"},
+    }
+    all_items = release_set_items(SET_ALL, "In", "2026-40", all_parts, b"pa")
+    assert [(item.kind, item.tag, item.name_week) for item in all_items] == [
+        (KIND_PROJECT, "ALL", "2026-40"),
+        (KIND_DISCOUNT_HIST, "ALL", "2026-41"),
+        (KIND_WEEK_DISCOUNT, "In", "2026-40"),
+        (KIND_WEEK_DISCOUNT, "OutByCondition", "2026-40"),
+    ]
+    try:
+        release_set_items(SET_ALL, "In", "2026-40", {**all_parts, "week_discounts": {"Out": None}}, b"p")
+        raise AssertionError("an empty ticked Week Discount must be refused")
+    except ValueError:
+        pass
+    assert len(release_set_items(SET_ALL, "In", "2026-40", {**all_parts, "week_discounts": {}}, b"p")) == 2
+    _, all_zip = release_zip_bytes("A-used", all_items)
+    with __import__("zipfile").ZipFile(__import__("io").BytesIO(all_zip)) as archive:
+        assert "week_discount_A-used_ByCondition_2026-40_rlsd.csv" in archive.namelist()
+    all_wd_rel = save_set(storage, "2026-40", all_items, release=True)
+    assert all_wd_rel.revision == 6
+    assert sorted(all_wd_rel.unreleased) == [
+        "discount_hist_C-used_ALL_2026-41_r04_rlsd.csv",
+        "discount_project_C-used_ALL_2026-40_r04_rlsd.disc_proj",
+    ]
+    names_40 = storage.week_names("2026-40")
+    assert "week_discount_C-used_ByCondition_2026-40_r06_rlsd.csv" in names_40
+    assert "week_discount_C-used_Out_2026-40_r05_rlsd.csv" in names_40
+
+    pbs_mode = "TrackingBaskets_v2 - product_BS. on date of sale"
+    assert week_discount_choices(pbs_mode, ("In", "Out", "OutByCondition", "OutByMinPrice", "Aggregated")) == [
+        "Aggregated", "In", "Out", "OutByCondition", "OutByMinPrice",
+    ]
+    assert week_discount_choices(pbs_mode, ()) == ["Aggregated", "In", "Out", "OutByCondition", "OutByMinPrice"]
+    assert week_discount_choices("TrackingBaskets_v2 report", ("In",)) == ["Aggregated"]
+    assert week_discount_defaults(("In", "Out", "OutByCondition", "OutByMinPrice"), ["In", "Out"], "In") == [
+        "In", "Out",
+    ]
+    assert week_discount_defaults((), ["Out"], "Out") == ["Out"]
+
+    save_items = project_save_items("ALL", "2026-40", b"ps", HistExport("2026-41", b"hs", ["In"]))
+    saved = save_set(storage, "2026-40", save_items)
+    assert saved.revision == 7 and saved.names == [
+        "discount_project_C-used_ALL_2026-40_r07.disc_proj",
+        "discount_hist_C-used_ALL_2026-41_r07.csv",
+    ]
+    assert saved.unreleased == []
+    assert [item.kind for item in project_save_items("In", "2026-40", b"ps", None)] == [KIND_PROJECT]
+
+    exp_week = result.all_weeks[-1]
+    exp_scope = {"analysis": result, "discount_hist_df": None, "planner": None}
+    exp_ss = {
+        "_pbs_scopes": {
+            f"pbs::{pbs_mode}::In": dict(exp_scope),
+            f"pbs::{pbs_mode}::Out": dict(exp_scope),
+        },
+    }
+    assert built_categories(exp_ss, pbs_mode, exp_week) == ["In", "Out"]
+    assert built_categories(exp_ss, pbs_mode, "1999-01") == []
+    wd_in = category_week_discount_csv(exp_ss, pbs_mode, "In", exp_week)
+    assert wd_in and wd_in.split(b"\n", 1)[0].startswith(b"Basket")
+    exp_ss[f"pbs::{pbs_mode}::In::wd_col_stock_{exp_week}"] = False
+    wd_in_narrow = category_week_discount_csv(exp_ss, pbs_mode, "In", exp_week)
+    assert len(wd_in_narrow.split(b"\n", 1)[0]) < len(wd_in.split(b"\n", 1)[0])
+    hist_all = discount_hist_all_csv(exp_ss, pbs_mode, "In", exp_week)
+    hist_in = discount_hist_category_csv(exp_ss, pbs_mode, "In", exp_week)
+    assert hist_all is not None and hist_all.categories == ["In", "Out"]
+    assert hist_in is not None and hist_in.categories == ["In"] and hist_in.next_week == hist_all.next_week
+    tr_ss = {"_pbs_scopes": {"mode::TrackingBaskets_v2 report": dict(exp_scope)}}
+    assert built_categories(tr_ss, "TrackingBaskets_v2 report", exp_week) == ["Aggregated"]
+    tr_hist = discount_hist_all_csv(tr_ss, "TrackingBaskets_v2 report", "Aggregated", exp_week)
+    assert tr_hist is not None and tr_hist.categories == ["Aggregated"]
+
+    zip_name, zip_bytes = release_zip_bytes("A-used", cat_items)
+    assert zip_name == "discount_project_A-used_In_2026-40_rlsd.zip"
+    import io as _io
+    import zipfile as _zipfile
+    with _zipfile.ZipFile(_io.BytesIO(zip_bytes)) as archive:
+        assert sorted(archive.namelist()) == [
+            "discount_hist_A-used_In_2026-41_rlsd.csv",
+            "discount_project_A-used_In_2026-40_rlsd.disc_proj",
+            "week_discount_A-used_In_2026-40_rlsd.csv",
+        ]
 
     print("\nLogin password hashing and throttling...")
     from core.security.passwords import (

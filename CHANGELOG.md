@@ -6,6 +6,30 @@ Main updates only, newest first. Details live in `handoff_*.md` and `docs/`.
 
 ---
 
+## Unreleased: 2026-10-10 – 2026-10-14 (not yet deployed)
+
+### Added
+- **2026-10-10 · Google Drive** (Solution C): any signed-in PBA user can save / list / restore through one root folder on the operator's personal Drive. Refresh token in `[gdrive]` secrets (`root_folder_id`). Browser download and upload stay. Setup: `docs/gdrive-setup.md`, `scripts/gdrive_oauth.py`.
+- **2026-10-12 · Flows**: a start screen after login to pick a flow (A-used, B-used, NEW, …) or create one; the current flow is shown under the title and in the sidebar, with **Switch flow…**. With Drive each flow is a folder with `flow.json` and week folders `input / proj / week_discount / discount_history`. Seeds in `configs/flows.csv`.
+- **2026-10-12 · Revisions and Release**: every Drive save is a new revision `rNN`; nothing is overwritten. **Release…** (Week Discount → Export) saves the project and its exports as one revision marked `_rlsd`; without Drive it downloads a zip. Next week offers the released discount history by default.
+- **2026-10-14 · Project → Save** gets a **discount_history** checkbox (on by default) and the tag defaults to **ALL**: the project and the matching discount history are downloaded or saved to Drive as one revision.
+- **2026-10-14 · Release → ALL** gets a **Week discount** expander: one checkbox per category, ticked from the flow's defaults (A-used: In, Out, ByCondition, ByMinPrice; B-used and NEW: Aggregated). Ticked categories add their Week Discount files to the ALL set.
+
+### Changed
+- **2026-10-14 · Short tags** in file names: `ByCondition`, `ByMinPrice` instead of `OutByCondition`, `OutByMinPrice`.
+- **2026-10-14 · Export builders** moved to `ui/week_discount_exports.py`, so the Export row, Project Save and Release produce the same files.
+
+### Removed
+- **2026-10-14 · Save exports to Drive**: it duplicated Project → Save. Use **Save…** for work in progress and **Release…** for the final set.
+
+### Fixed
+- **2026-10-12 · Drive on Windows behind an HTTPS-inspecting proxy** (`ssl.SSLCertVerificationError`): Drive calls use a CA bundle with the Windows certificate store.
+
+### New modules
+- `core/flows.py`, `core/persistence/file_naming.py`, `core/persistence/flow_storage.py`, `ui/flow_ui.py`, `ui/release_ui.py`, `ui/week_discount_exports.py`, `configs/flows.csv`
+
+---
+
 ## 1.0.2.t1: 2026-10-06 – 2026-10-10 (deployed to the test app)
 
 ### Added

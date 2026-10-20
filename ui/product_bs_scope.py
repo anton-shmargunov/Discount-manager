@@ -64,6 +64,7 @@ def default_product_bs_scope_state() -> dict[str, Any]:
         "build_message": None,
         "discount_hist_df": None,
         "planner": None,
+        "inputs": None,
     }
 
 

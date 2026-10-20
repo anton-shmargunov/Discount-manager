@@ -13,6 +13,7 @@ import streamlit as st
 
 from configs.settings import APP_TITLE, APP_VERSION
 from configs.theme_bootstrap import apply_page_theme
+from ui.flow_ui import render_flow_caption
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -28,6 +29,7 @@ apply_page_theme()
 
 st.title(f"📈 {APP_TITLE}")
 st.caption(f"Version {APP_VERSION}  ·  Phase 1 — Analytical Prototype")
+render_flow_caption()
 st.divider()
 
 st.markdown("""

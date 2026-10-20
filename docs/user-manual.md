@@ -17,7 +17,7 @@ PBA helps pricing analysts:
 5. Group baskets into **Campaigns and Jobs**, each with its own discount / prom strategy
 6. Plan **discounts and promotions** for a selected week using strategy rules or manual edits
 7. Export results and updated discount history
-8. Optionally **Save** the session as a `.disc_proj` file and **Restore** it later
+8. **Save** the session as a `.disc_proj` file (with its discount history) and **Restore** it later; **Release** the final set for the next week and the further workflow
 
 **Live app:** https://discount-manager-v1-1.streamlit.app/
 
@@ -49,6 +49,15 @@ Open http://localhost:8501
 
 **Administrators:** run `python scripts/hash_password.py` and paste the printed entry into `.streamlit/secrets.toml` (local) or the app's **Settings → Secrets** (Streamlit Cloud). To remove access, delete the user's entry. Details: [architecture.md → Access control](architecture.md#access-control).
 
+### Choose a flow
+
+After sign-in, **Choose a flow** asks which product group you work on (for example **A-used**, **B-used**, **NEW**). Each flow has its own reports, discount history, projects and Week Discount files.
+
+- Pick a flow and click **Start**. The current flow is shown under the page title and in the sidebar.
+- **Switch flow…** (sidebar) clears the session; download the project first if you need it.
+- **Create new flow**: flow id (for example `C-used`; letters, digits and `-`, cannot be changed later), label, the Product BS categories it offers, and the **Week Discount files on release** (one Aggregated file, or one file per category). With Google Drive the flow gets its own folder; without Drive it lasts for this session only.
+- Projects of another flow are refused on Restore.
+
 ---
 
 ## Workflow overview
@@ -66,7 +75,7 @@ Sum-Up section → Select a week
        ↓
 Week Discount → Apply strategy → Generate / Edit → Export
        ↓
-Optional: Project → Save… / Restore (.disc_proj)
+Project → Save… (work in progress)   ·   Export → Release… (final set)
 ```
 
 Each major step is described below in order.
@@ -448,8 +457,36 @@ Open the **Export** expander below the Week Discount table. Buttons are disabled
 | **Week Discount** | Visible Week Discount columns (raw numeric values) for the current category |
 | **Discount history. Current** | Discount-history CSV for the **current** Product BS category (report mode: Aggregated) |
 | **Discount history. All** | One combined hist CSV with New Discount / New Prom from **every Product BS category already Built** this session (product_BS modes only) |
+| **Release…** | Saves the final set as one revision marked released (`_rlsd`); see below |
 
 **Discount history. All** is empty until you **Build** (and generate/edit) each category you want included. Switching category and building again is required; categories not built in this session are omitted.
+
+File names follow `<kind>_<flow>_<tag>_<week>.csv`, for example `week_discount_A-used_ByCondition_2026-40.csv`. Tags: `In`, `Out`, `ByCondition`, `ByMinPrice`, `Aggregated`, `ALL`. Discount history carries the week it is for (selected week + 1).
+
+### Files and their purpose
+
+| File | Purpose |
+|------|---------|
+| `discount_project_…` (`.disc_proj`) | Internal: the saved session |
+| `discount_hist_…` | Internal: history for the next analysis, when the next Tracking Basket report arrives |
+| `week_discount_…` | External: the export for the further workflow |
+
+To save work in progress, use **Project → Save…** (project and discount history). To hand over the final set, use **Release…**.
+
+### Release
+
+**Release…** opens a dialog with two sets:
+
+| Set | Files |
+|-----|-------|
+| **Category** (current) | project, Week Discount, Discount history. Current — all tagged with the current category |
+| **ALL** | project ALL, Discount history. All, and the Week Discount file of every category ticked under **Week discount** |
+
+In the **ALL** set, the **Week discount** expander lists the flow's categories. The flow's defaults are ticked: A-used releases four files (In, Out, ByCondition, ByMinPrice); B-used and NEW release one Aggregated file. Categories not built in this session are disabled. Each category's file uses that category's own column toggles and **Include 'no stock'** option; table Filters apply to the current category only.
+
+With Google Drive, **Release to Drive** saves the set into `<flow>/<week>/` as a new revision and marks it `_rlsd`; the mark moves off the previous release of the same tag. A warning appears if the flow already has a newer week folder. Without Drive, **Download release set (zip)** gives the same files with `_rlsd` names.
+
+Next week, the discount-history uploader offers the latest released history of the flow (**ALL** first, then the category) when nothing is uploaded.
 
 ### Options
 
@@ -520,8 +557,9 @@ The sidebar **Project** expander (above **Log**) snapshots the current session.
 
 | Action | Result |
 |--------|--------|
-| **Save…** | Dialog for a file name → download a `.disc_proj` file |
+| **Save…** | Dialog: **Tag** (default **ALL**, or the current category), file name and **discount_history** (on by default). Downloads the `.disc_proj` and the discount history (ALL → Discount history. All; category → Discount history. Current). With Google Drive, **Save to Drive** writes both into `<flow>/<week>/` as one new revision; nothing is overwritten and nothing is released. |
 | **Restore** | Upload a `.disc_proj` file, then click **Restore** |
+| **Restore from Drive** | Pick a `.disc_proj` of the current flow from Drive (when configured); released projects are listed first |
 
 What is saved:
 

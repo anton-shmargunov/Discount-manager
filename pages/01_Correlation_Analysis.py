@@ -1768,10 +1768,11 @@ INPUT_MODE_OPTIONS = [
     PRODUCT_BS_ON_DATE_MODE,
     PRODUCT_BS_MONTHLY_AV_MODE,
 ]
+if ss.get("input_mode") not in INPUT_MODE_OPTIONS:
+    ss["input_mode"] = PRODUCT_BS_ON_DATE_MODE
 input_mode = st.radio(
     "Input format",
     INPUT_MODE_OPTIONS,
-    index=INPUT_MODE_OPTIONS.index(PRODUCT_BS_ON_DATE_MODE),
     horizontal=False,
     key="input_mode",
 )
@@ -1965,7 +1966,7 @@ if build_clicked:
                         f"Discount history: released file {released_hist_choice['name']}"
                     )
                 if input_mode == TRACKING_REPORT_MODE:
-                    df_report = pd.read_csv(io.BytesIO(file_tracking.read()))
+                    df_report = pd.read_csv(io.BytesIO(file_tracking.read()), low_memory=False)
                     log_lines.append(f"TrackingBaskets rows uploaded: {len(df_report)}")
                     analysis = run_tracking_report_analysis(
                         df_report,
@@ -1979,7 +1980,7 @@ if build_clicked:
                         log_lines,
                     )
                 else:
-                    df_report = pd.read_csv(io.BytesIO(file_tracking.read()))
+                    df_report = pd.read_csv(io.BytesIO(file_tracking.read()), low_memory=False)
                     log_lines.append(f"TrackingBaskets product_BS rows uploaded: {len(df_report)}")
                     log_lines.append(f"Product BS category: {product_bs_category}")
                     log_lines.append(

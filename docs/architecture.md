@@ -599,7 +599,7 @@ pytest is not installed; the file runs as a script. Compile check: `python -m py
 | Streamlit Cloud | https://discount-manager-v1-1.streamlit.app/ |
 | GitHub | https://github.com/anton-shmargunov/Discount-manager |
 | Python | 3.9+ locally (tested on 3.9.13); **3.12** on Cloud (set when the Cloud app is created; 3.14 crashed with a segmentation fault) |
-| Packages | Pinned in `requirements.txt` (Streamlit `1.49.1`, needs `width="stretch"`). Pins avoid surprise upgrades on Cloud rebuilds, which break open browser tabs ("Failed to fetch dynamically imported module") |
+| Packages | Pinned in `requirements.txt`. Streamlit `1.66.1` on Cloud (Python ≥ 3.11), `1.49.1` locally on Python 3.9; both need `width="stretch"`. 1.49.1 on Cloud served frontend files slowly or with HTTP 500 ("Failed to fetch dynamically imported module", missing icons). Pins avoid surprise upgrades on Cloud rebuilds, which break open browser tabs |
 | Secrets | `[app_users]` login entries (see [Access control](#access-control)). Optional `[gdrive]` for Drive save/restore (`docs/gdrive-setup.md`). Add `[app_users]` on Cloud **before** pushing, or the page is locked |
 
 Each Cloud app redeploys (~1 minute) when its branch is pushed: the main app from `main`, the test app from `v1-1-test_1`.

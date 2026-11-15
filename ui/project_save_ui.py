@@ -32,11 +32,14 @@ from ui.flow_ui import (
     default_project_name,
     known_flow_ids,
 )
+from ui.busy import busy
 from ui.gdrive_secrets import try_drive_store
 from ui.week_discount_exports import (
     HistExport,
+    clear_hist_export_cache,
     discount_hist_all_csv,
     discount_hist_category_csv,
+    sync_shared_discount_hist,
 )
 
 _PROJECT_LIST_KEY = "_gdrive_proj_list"
@@ -110,7 +113,8 @@ def _save_project_dialog() -> None:
         ),
     )
     try:
-        data, payload = build_current_project_bytes()
+        with busy("Preparing project file…"):
+            data, payload = build_current_project_bytes()
     except Exception as exc:
         st.error(f"Could not build project file: {exc}")
         return
@@ -118,7 +122,8 @@ def _save_project_dialog() -> None:
     week = current_scope_week()
     history: Optional[HistExport] = None
     if include_history:
-        history = _session_history(tag, week) if is_week(week) else None
+        with busy("Preparing discount history…"):
+            history = _session_history(tag, week) if is_week(week) else None
         if history is None:
             st.caption(
                 "Discount history is not available yet: build the analysis and "
@@ -174,12 +179,13 @@ def _save_project_dialog() -> None:
         ),
     ):
         try:
-            result = save_set(
-                FlowStorage(store, flow.flow_id),
-                week,
-                project_save_items(tag, week, data, history),
-            )
-            _clear_project_list()
+            with busy(f"Saving to Google Drive ({flow.flow_id}/{week})…"):
+                result = save_set(
+                    FlowStorage(store, flow.flow_id),
+                    week,
+                    project_save_items(tag, week, data, history),
+                )
+                _clear_project_list()
             st.success("Saved to Drive: " + ", ".join(result.names))
             for warning in result.warnings:
                 st.warning(warning)
@@ -193,7 +199,8 @@ def _drive_project_files(store: DriveStore, flow: Flow) -> list[dict]:
     cached = st.session_state.get(_PROJECT_LIST_KEY)
     if isinstance(cached, dict) and cached.get("flow_id") == flow.flow_id:
         return cached["files"]
-    files = FlowStorage(store, flow.flow_id).list_projects()
+    with busy(f"Loading projects from Google Drive ({flow.flow_id})…"):
+        files = FlowStorage(store, flow.flow_id).list_projects()
     rows = [
         {
             "id": item.file.id,
@@ -223,7 +230,8 @@ def _default_project_index(rows: list[dict], category: str) -> int:
 def _render_drive_restore(store: DriveStore, flow: Flow) -> None:
     st.markdown("**Restore from Drive**")
     if st.button("Refresh list", key="_project_drive_refresh_btn", width="stretch"):
-        _clear_project_list()
+        with busy("Refreshing project list…"):
+            _clear_project_list()
         st.rerun()
     try:
         rows = _drive_project_files(store, flow)
@@ -256,7 +264,8 @@ def _render_drive_restore(store: DriveStore, flow: Flow) -> None:
     ):
         row = by_id[choice]
         try:
-            raw = store.download_file(row["folder_id"], str(choice))
+            with busy(f"Downloading {row['name']}…"):
+                raw = store.download_file(row["folder_id"], str(choice))
             st.session_state["_project_bytes"] = raw
             st.session_state["_project_restore_name"] = row["name"]
             st.session_state["_do_project_restore"] = True
@@ -336,25 +345,21 @@ def apply_pending_project_restore() -> None:
         st.session_state["_project_restore_message"] = "Restore failed: empty file."
         return
     try:
-        payload = unpack_project_bytes(raw)
-        flow = current_flow()
-        warning: Optional[str] = None
-        if flow is not None:
-            warning = check_project_flow(
-                payload,
-                flow.flow_id,
-                filename=filename,
-                known_flow_ids=known_flow_ids(),
-            )
-        log_lines = apply_project_payload(st.session_state, payload)
-        from ui.week_discount_exports import (
-            clear_hist_export_cache,
-            sync_shared_discount_hist,
-        )
-
-        sync_shared_discount_hist(st.session_state)
-        clear_hist_export_cache(st.session_state)
-        st.session_state.pop("_wd_ui_hist_current_cache", None)
+        with busy("Restoring project into this session…"):
+            payload = unpack_project_bytes(raw)
+            flow = current_flow()
+            warning: Optional[str] = None
+            if flow is not None:
+                warning = check_project_flow(
+                    payload,
+                    flow.flow_id,
+                    filename=filename,
+                    known_flow_ids=known_flow_ids(),
+                )
+            log_lines = apply_project_payload(st.session_state, payload)
+            sync_shared_discount_hist(st.session_state)
+            clear_hist_export_cache(st.session_state)
+            st.session_state.pop("_wd_ui_hist_current_cache", None)
         if warning:
             log_lines.append(warning)
         st.session_state.log_messages = log_lines

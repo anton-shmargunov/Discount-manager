@@ -34,6 +34,7 @@ from core.persistence.flow_storage import (
     save_set,
 )
 from core.persistence.gdrive import DriveClientError
+from ui.busy import busy
 from ui.flow_ui import build_current_project_bytes, current_flow, known_flow_ids
 from ui.gdrive_secrets import try_drive_store
 from ui.product_bs_scope import (
@@ -160,8 +161,9 @@ def _all_set_parts(
 ) -> dict[str, Any]:
     """ALL-set parts: "Discount history. All" plus the Week Discount files ticked in the expander."""
     ss = st.session_state
-    hist_all = discount_hist_all_csv(ss, input_mode, category, week)
-    built = built_categories(ss, input_mode, week)
+    with busy("Preparing Discount history. All…"):
+        hist_all = discount_hist_all_csv(ss, input_mode, category, week)
+        built = built_categories(ss, input_mode, week)
     choices = week_discount_choices(input_mode, flow.categories)
     defaults = week_discount_defaults(flow.week_discount_categories, built, category)
     ticked: list[str] = []
@@ -182,11 +184,14 @@ def _all_set_parts(
             if checked and is_built:
                 ticked.append(choice)
     week_discounts: dict[str, Optional[bytes]] = {}
-    for choice in ticked:
-        if choice == category and parts.get("week_discount"):
-            week_discounts[choice] = parts["week_discount"]
-        else:
-            week_discounts[choice] = category_week_discount_csv(ss, input_mode, choice, week)
+    with busy("Preparing Week Discount files…"):
+        for choice in ticked:
+            if choice == category and parts.get("week_discount"):
+                week_discounts[choice] = parts["week_discount"]
+            else:
+                week_discounts[choice] = category_week_discount_csv(
+                    ss, input_mode, choice, week,
+                )
     return {
         "next_week": hist_all.next_week if hist_all else parts.get("next_week"),
         "hist_all": hist_all.data if hist_all else None,
@@ -216,8 +221,9 @@ def _release_dialog(parts: dict[str, Any], week: str, category: str, input_mode:
         else parts
     )
     try:
-        project_bytes, _ = build_current_project_bytes()
-        items = release_set_items(set_kind, category, week, set_parts, project_bytes)
+        with busy("Preparing release set…"):
+            project_bytes, _ = build_current_project_bytes()
+            items = release_set_items(set_kind, category, week, set_parts, project_bytes)
     except Exception as exc:
         st.error(str(exc))
         return
@@ -232,7 +238,8 @@ def _release_dialog(parts: dict[str, Any], week: str, category: str, input_mode:
             "Google Drive is not configured: download the release set and file it yourself. "
             "Later weeks will not load it automatically."
         )
-        zip_name, zip_bytes = release_zip_bytes(flow.flow_id, items)
+        with busy("Building release zip…"):
+            zip_name, zip_bytes = release_zip_bytes(flow.flow_id, items)
         st.download_button(
             "Download release set (zip)",
             data=zip_bytes,
@@ -247,8 +254,9 @@ def _release_dialog(parts: dict[str, Any], week: str, category: str, input_mode:
     storage = FlowStorage(store, flow.flow_id)
     tag = ALL_TAG if set_kind == SET_ALL else category
     try:
-        current = storage.released_in_week(week, KIND_PROJECT, tag)
-        newer = storage.newer_weeks(week)
+        with busy("Checking released files on Google Drive…"):
+            current = storage.released_in_week(week, KIND_PROJECT, tag)
+            newer = storage.newer_weeks(week)
     except DriveClientError as exc:
         st.error(str(exc))
         return
@@ -267,11 +275,12 @@ def _release_dialog(parts: dict[str, Any], week: str, category: str, input_mode:
         )
     if st.button("Release to Drive", type="primary", width="stretch", key="_release_confirm_btn"):
         try:
-            result = save_set(storage, week, items, release=True)
+            with busy(f"Releasing to Google Drive ({flow.flow_id}/{week})…"):
+                result = save_set(storage, week, items, release=True)
+                _clear_drive_caches()
         except (DriveClientError, ValueError) as exc:
             st.error(str(exc))
             return
-        _clear_drive_caches()
         st.success(f"Released r{result.revision:02d}: " + ", ".join(result.names))
         if result.unreleased:
             st.caption("Release mark removed from: " + ", ".join(result.unreleased))
@@ -321,9 +330,10 @@ def render_released_history_option(category: str, uploaded_files: Any) -> Option
     cache_key = f"{flow.flow_id}::{category}"
     if cache_key not in cache:
         try:
-            found = FlowStorage(store, flow.flow_id).find_released_history(
-                history_tag_preference(category)
-            )
+            with busy("Looking up released discount history on Google Drive…"):
+                found = FlowStorage(store, flow.flow_id).find_released_history(
+                    history_tag_preference(category)
+                )
         except DriveClientError as exc:
             st.caption(f"Released history lookup failed: {exc}")
             return None
@@ -358,7 +368,8 @@ def load_released_history(row: dict) -> NamedUpload:
     store, drive_error = try_drive_store()
     if store is None:
         raise DriveClientError(drive_error or "Google Drive is not configured.")
-    data = store.download_file(row["folder_id"], row["file_id"])
+    with busy(f"Downloading released history {row['name']}…"):
+        data = store.download_file(row["folder_id"], row["file_id"])
     return NamedUpload(row["name"], data)
 
 

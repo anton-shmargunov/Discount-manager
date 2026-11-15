@@ -66,6 +66,7 @@ from ui.release_ui import (
     render_released_history_option,
     warn_foreign_flow_uploads,
 )
+from ui.busy import busy
 from ui.week_discount_ui import render_week_discount_section
 from ui.week_discount_exports import (
     clear_hist_export_cache,
@@ -983,41 +984,42 @@ def _render_margin_model(
         )
 
         if run_margin_model_clicked:
-            res = evaluate_week_margin_model(
-                week=ts.weeks[week_idx],
-                price_actual=ts.price[week_idx],
-                stock_actual=ts.stock[week_idx],
-                m_actual=m_series[week_idx],
-                fit_sold=fit_sold,
-                fit_cost=fit_cost,
-            )
-            target = evaluate_margin_target(
-                price_actual=ts.price[week_idx],
-                stock_actual=ts.stock[week_idx],
-                sold_actual=ts.sold[week_idx],
-                fit_sold=fit_sold,
-                fit_cost=fit_cost,
-                price_target=price_manual,
-                stock_target=stock_manual,
-            )
-            metrics = compute_margin_fit_metrics(
-                ts.price, ts.stock, m_series, fit_sold, fit_cost, indices=fit_indices,
-            )
-            prices_grid, stocks_grid, m_grid = build_margin_surface(
-                fit_sold, fit_cost,
-                price_range=(p_min_val, p_max_val),
-                stock_range=(s_min_val, s_max_val),
-                n_price=n_p, n_stock=n_s,
-            )
-            p_max_vals = compute_price_max_curve(fit_sold, fit_cost, stocks_grid)
-            scope["margin_model"][basket_name] = {
-                "result": res,
-                "target": target,
-                "metrics": metrics,
-                "surface": (prices_grid, stocks_grid, m_grid),
-                "stock_grid": stocks_grid,
-                "price_max_values": p_max_vals,
-            }
+            with busy(f"Running margin model ({basket_name})…"):
+                res = evaluate_week_margin_model(
+                    week=ts.weeks[week_idx],
+                    price_actual=ts.price[week_idx],
+                    stock_actual=ts.stock[week_idx],
+                    m_actual=m_series[week_idx],
+                    fit_sold=fit_sold,
+                    fit_cost=fit_cost,
+                )
+                target = evaluate_margin_target(
+                    price_actual=ts.price[week_idx],
+                    stock_actual=ts.stock[week_idx],
+                    sold_actual=ts.sold[week_idx],
+                    fit_sold=fit_sold,
+                    fit_cost=fit_cost,
+                    price_target=price_manual,
+                    stock_target=stock_manual,
+                )
+                metrics = compute_margin_fit_metrics(
+                    ts.price, ts.stock, m_series, fit_sold, fit_cost, indices=fit_indices,
+                )
+                prices_grid, stocks_grid, m_grid = build_margin_surface(
+                    fit_sold, fit_cost,
+                    price_range=(p_min_val, p_max_val),
+                    stock_range=(s_min_val, s_max_val),
+                    n_price=n_p, n_stock=n_s,
+                )
+                p_max_vals = compute_price_max_curve(fit_sold, fit_cost, stocks_grid)
+                scope["margin_model"][basket_name] = {
+                    "result": res,
+                    "target": target,
+                    "metrics": metrics,
+                    "surface": (prices_grid, stocks_grid, m_grid),
+                    "stock_grid": stocks_grid,
+                    "price_max_values": p_max_vals,
+                }
             st.rerun()
     with result_clmn:
         saved_model = scope["margin_model"].get(basket_name)
@@ -1121,49 +1123,50 @@ def _render_sumup_margin_model(
         )
 
         if run_margin_model_clicked:
-            row = selected_row
-            res = evaluate_week_margin_model(
-                week=row["week"],
-                price_actual=row["weighted_price"],
-                stock_actual=row["total_stock"],
-                m_actual=row.get(margin_key, row["total_m"]),
-                fit_sold=fit_sold,
-                fit_cost=fit_cost,
-            )
-            target = evaluate_margin_target(
-                price_actual=row["weighted_price"],
-                stock_actual=row["total_stock"],
-                sold_actual=row.get("total_sold", float("nan")),
-                fit_sold=fit_sold,
-                fit_cost=fit_cost,
-                price_target=price_manual,
-                stock_target=stock_manual,
-            )
-            metrics = compute_margin_fit_metrics(
-                prices,
-                stocks,
-                [r.get(margin_key, r["total_m"]) for r in sumup_rows],
-                fit_sold,
-                fit_cost,
-                indices=fit_indices,
-            )
-            prices_grid, stocks_grid, m_grid = build_margin_surface(
-                fit_sold,
-                fit_cost,
-                price_range=(p_min_val, p_max_val),
-                stock_range=(s_min_val, s_max_val),
-                n_price=n_p,
-                n_stock=n_s,
-            )
-            p_max_vals = compute_price_max_curve(fit_sold, fit_cost, stocks_grid)
-            scope["sumup_margin_model"] = {
-                "result": res,
-                "target": target,
-                "metrics": metrics,
-                "surface": (prices_grid, stocks_grid, m_grid),
-                "stock_grid": stocks_grid,
-                "price_max_values": p_max_vals,
-            }
+            with busy("Running Sum-Up margin model…"):
+                row = selected_row
+                res = evaluate_week_margin_model(
+                    week=row["week"],
+                    price_actual=row["weighted_price"],
+                    stock_actual=row["total_stock"],
+                    m_actual=row.get(margin_key, row["total_m"]),
+                    fit_sold=fit_sold,
+                    fit_cost=fit_cost,
+                )
+                target = evaluate_margin_target(
+                    price_actual=row["weighted_price"],
+                    stock_actual=row["total_stock"],
+                    sold_actual=row.get("total_sold", float("nan")),
+                    fit_sold=fit_sold,
+                    fit_cost=fit_cost,
+                    price_target=price_manual,
+                    stock_target=stock_manual,
+                )
+                metrics = compute_margin_fit_metrics(
+                    prices,
+                    stocks,
+                    [r.get(margin_key, r["total_m"]) for r in sumup_rows],
+                    fit_sold,
+                    fit_cost,
+                    indices=fit_indices,
+                )
+                prices_grid, stocks_grid, m_grid = build_margin_surface(
+                    fit_sold,
+                    fit_cost,
+                    price_range=(p_min_val, p_max_val),
+                    stock_range=(s_min_val, s_max_val),
+                    n_price=n_p,
+                    n_stock=n_s,
+                )
+                p_max_vals = compute_price_max_curve(fit_sold, fit_cost, stocks_grid)
+                scope["sumup_margin_model"] = {
+                    "result": res,
+                    "target": target,
+                    "metrics": metrics,
+                    "surface": (prices_grid, stocks_grid, m_grid),
+                    "stock_grid": stocks_grid,
+                    "price_max_values": p_max_vals,
+                }
             st.rerun()
 
     with result_clmn:
@@ -1469,19 +1472,20 @@ def _render_basket_detail_plot_expanders(
         )
 
         if fit_cost_line_clicked:
-            if len(fit_indices_cost) < 2:
-                st.warning("Select at least 2 data points to fit a line.")
-                lf = None
-            else:
-                lf = fit_line(
-                    [ts.price[i] for i in fit_indices_cost],
-                    [ts.cost[i] for i in fit_indices_cost],
-                )
-            if lf is None:
-                st.warning("Not enough data points to fit a line.")
-            else:
-                scope["fit_cost"][basket_name] = lf
-                st.rerun()
+            with busy(f"Fitting Cost × Price ({basket_name})…"):
+                if len(fit_indices_cost) < 2:
+                    st.warning("Select at least 2 data points to fit a line.")
+                    lf = None
+                else:
+                    lf = fit_line(
+                        [ts.price[i] for i in fit_indices_cost],
+                        [ts.cost[i] for i in fit_indices_cost],
+                    )
+                if lf is None:
+                    st.warning("Not enough data points to fit a line.")
+                else:
+                    scope["fit_cost"][basket_name] = lf
+                    st.rerun()
         if fit_cost_res:
             cost_res_col, _ = st.columns([3, 1])
             with cost_res_col.container(border=True):
@@ -1548,22 +1552,23 @@ def _render_basket_detail_plot_expanders(
             key=sk(f"3d_pss_{basket_name}_{chart_state_key}"),
         )
         if fit_sold_plane_clicked:
-            if len(fit_indices_s) < 3:
-                st.warning("Select at least 3 data points to fit a plane.")
-                pf = None
-            else:
-                pf = fit_plane(
-                    [ts.price[i] for i in fit_indices_s],
-                    [ts.stock[i] for i in fit_indices_s],
-                    [ts.sold[i] for i in fit_indices_s],
-                    method=method_s,
-                )
-            if pf is None:
-                st.warning("Not enough data points to fit a plane.")
-            else:
-                scope["fit_sold"][basket_name] = pf
-                scope.setdefault("fit_sold_indices", {})[basket_name] = list(fit_indices_s)
-                st.rerun()
+            with busy(f"Fitting Price × Stock × Sold ({basket_name})…"):
+                if len(fit_indices_s) < 3:
+                    st.warning("Select at least 3 data points to fit a plane.")
+                    pf = None
+                else:
+                    pf = fit_plane(
+                        [ts.price[i] for i in fit_indices_s],
+                        [ts.stock[i] for i in fit_indices_s],
+                        [ts.sold[i] for i in fit_indices_s],
+                        method=method_s,
+                    )
+                if pf is None:
+                    st.warning("Not enough data points to fit a plane.")
+                else:
+                    scope["fit_sold"][basket_name] = pf
+                    scope.setdefault("fit_sold_indices", {})[basket_name] = list(fit_indices_s)
+                    st.rerun()
         if fit_sold_res:
             sold_res_col, _ = st.columns([3, 1])
             with sold_res_col.container(border=True):
@@ -2079,6 +2084,11 @@ def sk(widget_key: str) -> str:
     return scoped_widget_key(pbs_scope_key, widget_key)
 
 
+st.caption(
+    f"Product BS: **{product_bs_category}** · {result.basket_count} baskets · "
+    f"{result.week_count} weeks"
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ③ General settings
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2143,26 +2153,27 @@ with st.expander("Cost Correction", expanded=True):
     cost_a_min = _parse_float(str(a_min_raw), 0.0)
     cost_a_max = _parse_optional_float(str(a_max_raw))
 
-if correct_margin:
-    scope["bulk_fit_cost_price"] = fit_bulk_cost_price(
+with busy(f"Preparing {product_bs_category} cost correction…"):
+    if correct_margin:
+        scope["bulk_fit_cost_price"] = fit_bulk_cost_price(
+            result.basket_data,
+            skip_last_points,
+            bool(skip_zero_price),
+        )
+
+    basket_corrections = compute_corrections_for_baskets(
         result.basket_data,
+        scope.get("bulk_fit_cost_price") or {},
         skip_last_points,
         bool(skip_zero_price),
+        str(cost_correction_mode),
+        cost_a_min,
+        cost_a_max,
     )
-
-basket_corrections = compute_corrections_for_baskets(
-    result.basket_data,
-    scope.get("bulk_fit_cost_price") or {},
-    skip_last_points,
-    bool(skip_zero_price),
-    str(cost_correction_mode),
-    cost_a_min,
-    cost_a_max,
-)
-scope["basket_margin_hybrid"] = hybrid_margin_map(
-    result.basket_data,
-    basket_corrections,
-)
+    scope["basket_margin_hybrid"] = hybrid_margin_map(
+        result.basket_data,
+        basket_corrections,
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ④ Cluster Overview
@@ -2291,29 +2302,32 @@ if planner_focus and "Basket" in df_table.columns:
 
 fit_ps_col, fit_pss_col, fit_cp_col, exp_col, _ = st.columns([1, 1, 1, 1, 2])
 if fit_ps_col.button("Fit Price x Sold", width="stretch"):
-    fitted: dict[str, Linefit] = {}
-    for basket_name, ts in result.basket_data.items():
-        lf = fit_line(ts.price, ts.sold)
-        if lf is not None:
-            fitted[basket_name] = lf
-    scope["bulk_fit_price_sold"] = fitted
+    with busy("Fitting Price × Sold for all baskets…"):
+        fitted: dict[str, Linefit] = {}
+        for basket_name, ts in result.basket_data.items():
+            lf = fit_line(ts.price, ts.sold)
+            if lf is not None:
+                fitted[basket_name] = lf
+        scope["bulk_fit_price_sold"] = fitted
     st.rerun()
 
 if fit_pss_col.button("Fit Price x Stock x Sold", width="stretch"):
-    fitted_planes: dict[str, Planefit] = {}
-    for basket_name, ts in result.basket_data.items():
-        pf = fit_plane(ts.price, ts.stock, ts.sold, method="mlr")
-        if pf is not None:
-            fitted_planes[basket_name] = pf
-    scope["bulk_fit_price_stock_sold"] = fitted_planes
+    with busy("Fitting Price × Stock × Sold for all baskets…"):
+        fitted_planes: dict[str, Planefit] = {}
+        for basket_name, ts in result.basket_data.items():
+            pf = fit_plane(ts.price, ts.stock, ts.sold, method="mlr")
+            if pf is not None:
+                fitted_planes[basket_name] = pf
+        scope["bulk_fit_price_stock_sold"] = fitted_planes
     st.rerun()
 
 if fit_cp_col.button("Fit Cost x Price", width="stretch"):
-    scope["bulk_fit_cost_price"] = fit_bulk_cost_price(
-        result.basket_data,
-        skip_last_points,
-        bool(skip_zero_price),
-    )
+    with busy("Fitting Cost × Price for all baskets…"):
+        scope["bulk_fit_cost_price"] = fit_bulk_cost_price(
+            result.basket_data,
+            skip_last_points,
+            bool(skip_zero_price),
+        )
     st.rerun()
 
 csv_bytes  = df_table.to_csv(index=False).encode()
@@ -3409,19 +3423,20 @@ with st.expander("📊 Sum-Up Total", expanded=True):
         )
     
         if fit_sumup_cost_clicked:
-            if len(fit_indices_sumup_cost) < 2:
-                st.warning("Select at least 2 data points to fit a line.")
-                lf = None
-            else:
-                lf = fit_line(
-                    [sumup_rows[i]["weighted_price"] for i in fit_indices_sumup_cost],
-                    [sumup_rows[i]["total_cost"] for i in fit_indices_sumup_cost],
-                )
-            if lf is None:
-                st.warning("Not enough data points to fit a line.")
-            else:
-                scope["fit_sumup_cost"] = lf
-                st.rerun()
+            with busy("Fitting Total Cost × W. Price…"):
+                if len(fit_indices_sumup_cost) < 2:
+                    st.warning("Select at least 2 data points to fit a line.")
+                    lf = None
+                else:
+                    lf = fit_line(
+                        [sumup_rows[i]["weighted_price"] for i in fit_indices_sumup_cost],
+                        [sumup_rows[i]["total_cost"] for i in fit_indices_sumup_cost],
+                    )
+                if lf is None:
+                    st.warning("Not enough data points to fit a line.")
+                else:
+                    scope["fit_sumup_cost"] = lf
+                    st.rerun()
     
         if fit_sumup_cost_res:
             cost_res_col, _ = st.columns([3, 1])
@@ -3488,22 +3503,23 @@ with st.expander("📊 Sum-Up Total", expanded=True):
         )
     
         if fit_sumup_plane_clicked:
-            if len(fit_indices_sumup) < 3:
-                st.warning("Select at least 3 data points to fit a plane.")
-                pf = None
-            else:
-                pf = fit_plane(
-                    [sumup_rows[i]["weighted_price"] for i in fit_indices_sumup],
-                    [sumup_rows[i]["total_stock"] for i in fit_indices_sumup],
-                    [sumup_rows[i]["total_sold"] for i in fit_indices_sumup],
-                    method=method_sumup,
-                )
-            if pf is None:
-                st.warning("Not enough data points to fit a plane.")
-            else:
-                scope["fit_sumup_stock_sold"] = pf
-                scope["fit_sumup_stock_sold_indices"] = list(fit_indices_sumup)
-                st.rerun()
+            with busy("Fitting W. Price × Total Stock × Total Sold…"):
+                if len(fit_indices_sumup) < 3:
+                    st.warning("Select at least 3 data points to fit a plane.")
+                    pf = None
+                else:
+                    pf = fit_plane(
+                        [sumup_rows[i]["weighted_price"] for i in fit_indices_sumup],
+                        [sumup_rows[i]["total_stock"] for i in fit_indices_sumup],
+                        [sumup_rows[i]["total_sold"] for i in fit_indices_sumup],
+                        method=method_sumup,
+                    )
+                if pf is None:
+                    st.warning("Not enough data points to fit a plane.")
+                else:
+                    scope["fit_sumup_stock_sold"] = pf
+                    scope["fit_sumup_stock_sold_indices"] = list(fit_indices_sumup)
+                    st.rerun()
     
         if fit_sumup_res:
             sumup_fit_res_col, _ = st.columns([3, 1])

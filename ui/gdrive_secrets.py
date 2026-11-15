@@ -13,6 +13,7 @@ from core.persistence.gdrive import (
     open_drive_store,
     parse_drive_config,
 )
+from ui.busy import busy
 
 SECRETS_SECTION = "gdrive"
 
@@ -32,7 +33,8 @@ def get_drive_store() -> Optional[DriveStore]:
     cached = st.session_state.get("_gdrive_store")
     if isinstance(cached, DriveStore) and cached.config == config:
         return cached
-    store = open_drive_store(config)
+    with busy("Connecting to Google Drive…"):
+        store = open_drive_store(config)
     st.session_state["_gdrive_store"] = store
     return store
 

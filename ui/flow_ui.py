@@ -24,6 +24,7 @@ from core.flows import (
 from core.persistence.file_naming import KIND_PROJECT, build_name
 from core.persistence.gdrive import DriveClientError, DriveStore
 from core.persistence.project_io import build_project_payload, pack_project_bytes
+from ui.busy import busy
 from ui.gdrive_secrets import try_drive_store
 from ui.product_bs_scope import (
     AGGREGATED_DISCOUNT_HIST_CATEGORY,
@@ -74,7 +75,8 @@ def _load_flows(store: Optional[DriveStore]) -> list[Flow]:
     seed = load_seed_flows()
     drive_flows: list[Flow] = []
     if store is not None:
-        drive_flows = list_drive_flows(store, seed)
+        with busy("Loading flows from Google Drive…"):
+            drive_flows = list_drive_flows(store, seed)
     flows = merge_flows(seed, drive_flows + _session_flows())
     st.session_state[FLOW_LIST_KEY] = [flow.to_session() for flow in flows]
     return flows
@@ -151,7 +153,8 @@ def _switch_flow_dialog() -> None:
         "Download the project first if you still need it."
     )
     try:
-        data, _ = build_current_project_bytes()
+        with busy("Preparing project download…"):
+            data, _ = build_current_project_bytes()
         st.download_button(
             "Download project first",
             data=data,
@@ -165,7 +168,8 @@ def _switch_flow_dialog() -> None:
         st.caption(f"Project could not be built: {exc}")
     confirm, cancel = st.columns(2)
     if confirm.button("Switch flow", type="primary", width="stretch", key="_flow_switch_confirm_btn"):
-        clear_session_for_flow_switch(st.session_state)
+        with busy("Switching flow…"):
+            clear_session_for_flow_switch(st.session_state)
         st.rerun()
     if cancel.button("Cancel", width="stretch", key="_flow_switch_cancel_btn"):
         st.rerun()
@@ -205,15 +209,16 @@ def _create_flow_dialog(
     confirm, cancel = st.columns(2)
     if confirm.button("Create", type="primary", width="stretch", key="_flow_create_confirm_btn"):
         try:
-            flow = create_flow(
-                store,
-                flow_id,
-                label,
-                categories,
-                week_discount_categories=week_discount_categories,
-                existing_ids=known_flow_ids(),
-                created_by=username,
-            )
+            with busy("Creating flow…"):
+                flow = create_flow(
+                    store,
+                    flow_id,
+                    label,
+                    categories,
+                    week_discount_categories=week_discount_categories,
+                    existing_ids=known_flow_ids(),
+                    created_by=username,
+                )
         except (ValueError, DriveClientError) as exc:
             st.error(str(exc))
             return
@@ -238,11 +243,12 @@ def _flow_option_label(flow: Flow) -> str:
 
 
 def _start_flow(flow: Flow, store: Optional[DriveStore], username: str) -> None:
-    if store is not None and not flow.folder_id:
-        folder_id = write_flow_meta(store, flow, created_by=username)
-        flow = Flow.from_meta({**flow.to_session(), "folder_id": folder_id, "source": "drive"})
-        _clear_flow_list()
-    _set_current_flow(flow)
+    with busy(f"Starting flow {flow.display}…"):
+        if store is not None and not flow.folder_id:
+            folder_id = write_flow_meta(store, flow, created_by=username)
+            flow = Flow.from_meta({**flow.to_session(), "folder_id": folder_id, "source": "drive"})
+            _clear_flow_list()
+        _set_current_flow(flow)
     st.rerun()
 
 
@@ -287,7 +293,8 @@ def _render_start_screen(username: str) -> None:
                 except DriveClientError as exc:
                     st.error(str(exc))
             if refresh_col.button("Refresh list", width="stretch", key="_flow_refresh_btn"):
-                _clear_flow_list()
+                with busy("Refreshing flow list…"):
+                    _clear_flow_list()
                 st.rerun()
         else:
             st.caption("No flows yet. Create the first one below.")

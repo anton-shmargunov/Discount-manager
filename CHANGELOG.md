@@ -2,11 +2,21 @@
 
 Main updates only, newest first. Details live in `handoff_*.md` and `docs/`.
 
-**Status as of 2026-10-10.** Changes are dated by when the work was done; releases by commit.
+**Status as of 2026-11-14.** Changes are dated by when the work was done; releases by commit.
 
 ---
 
-## Unreleased: 2026-10-10 – 2026-10-14 (not yet deployed)
+## 1.0.3.t2: 2026-11-14 (branch `v1-0-test_2`)
+
+### Fixed
+- **2026-11-14 · Week Discount / Release freezes**: discount-history Current/All CSVs are cached and no longer rebuilt on every toggle (e.g. Monthly Reserve). History merges are vectorized (no `iterrows`), identical hist DataFrames are merged once, and uploaded history is shared across Product BS scopes.
+
+### Changed
+- **2026-11-14 · Version** `1.0.2.t1` → `1.0.3.t2`.
+
+---
+
+## Unreleased: 2026-10-10 – 2026-10-14 (deployed on `v1-0-test_1`, formerly `v1-1-test_1`)
 
 ### Added
 - **2026-10-10 · Google Drive** (Solution C): any signed-in PBA user can save / list / restore through one root folder on the operator's personal Drive. Refresh token in `[gdrive]` secrets (`root_folder_id`). Browser download and upload stay. Setup: `docs/gdrive-setup.md`, `scripts/gdrive_oauth.py`.

@@ -1241,6 +1241,153 @@ def _source_row_to_discount_hist_export(row: pd.Series) -> dict[str, object] | N
     return hist_row
 
 
+def _is_blank_discount_hist_value(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    text = str(value).strip()
+    return not text or text.lower() in {"n/a", "na", "nan"}
+
+
+def _prefer_discount_hist_value(current: object, incoming: object) -> object:
+    """Keep non-blank values; later files overwrite earlier non-blank values."""
+    if _is_blank_discount_hist_value(incoming):
+        return "" if _is_blank_discount_hist_value(current) else current
+    return incoming
+
+
+def _blank_mask(series: pd.Series) -> pd.Series:
+    """True where a hist cell is blank (null / empty / n/a)."""
+    if series.empty:
+        return pd.Series(dtype=bool)
+    as_str = series.astype(str).str.strip()
+    return (
+        series.isna()
+        | (as_str == "")
+        | as_str.str.lower().isin({"n/a", "na", "nan", "none"})
+    )
+
+
+def dataframe_to_discount_hist_export(df: pd.DataFrame) -> pd.DataFrame:
+    """Vectorized conversion of a discount-history source table to export columns."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=DISCOUNT_HIST_EXPORT_COLUMNS)
+
+    report = normalize_csv_df(df)
+    lower_to_actual = {str(c).strip().lower(): c for c in report.columns}
+    basket_col = lower_to_actual.get("basket")
+    week_col = lower_to_actual.get("year_week")
+    if basket_col is None or week_col is None:
+        return pd.DataFrame(columns=DISCOUNT_HIST_EXPORT_COLUMNS)
+
+    out = pd.DataFrame(index=report.index)
+    out["basket"] = [_normalize_basket_id(v) for v in report[basket_col].tolist()]
+    out["year_week"] = report[week_col].astype(str).str.strip()
+
+    blank_source = next(
+        (
+            col
+            for col in report.columns
+            if str(col).strip() == "" or str(col).startswith("Unnamed")
+        ),
+        None,
+    )
+    for export_col in DISCOUNT_HIST_EXPORT_COLUMNS:
+        if export_col in {"basket", "year_week"}:
+            continue
+        if export_col == "":
+            if blank_source is None:
+                out[""] = ""
+            else:
+                vals = report[blank_source]
+                out[""] = vals.where(vals.notna(), "")
+            continue
+        source = lower_to_actual.get(export_col.strip().lower())
+        if source is None:
+            out[export_col] = ""
+        else:
+            vals = report[source]
+            out[export_col] = vals.where(vals.notna(), "")
+
+    keep = (out["basket"] != "") & (out["year_week"] != "") & (
+        out["year_week"].str.lower() != "nan"
+    )
+    out = out.loc[keep, DISCOUNT_HIST_EXPORT_COLUMNS].copy()
+    return out.reset_index(drop=True)
+
+
+def _sort_discount_hist_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame.reindex(columns=DISCOUNT_HIST_EXPORT_COLUMNS)
+    ordered = frame.copy()
+    ordered["_basket"] = ordered["basket"].astype(str)
+    ordered["_week"] = ordered["year_week"].astype(str)
+    ordered["_blen"] = ordered["_basket"].str.len()
+    ordered = ordered.sort_values(
+        ["_week", "_blen", "_basket"], kind="mergesort"
+    ).drop(columns=["_basket", "_week", "_blen"])
+    return ordered.reset_index(drop=True).reindex(columns=DISCOUNT_HIST_EXPORT_COLUMNS)
+
+
+def _coalesce_discount_hist_frames(
+    left: pd.DataFrame,
+    right: pd.DataFrame,
+) -> pd.DataFrame:
+    """Merge two export-shaped frames on (year_week, basket); later non-blanks win."""
+    if left is None or left.empty:
+        return right.copy() if right is not None else pd.DataFrame(columns=DISCOUNT_HIST_EXPORT_COLUMNS)
+    if right is None or right.empty:
+        return left.copy()
+
+    left_i = left.set_index(["year_week", "basket"], drop=False)
+    right_i = right.set_index(["year_week", "basket"], drop=False)
+    idx = left_i.index.union(right_i.index)
+    result = left_i.reindex(idx)
+    other = right_i.reindex(idx)
+
+    meta_cols = [
+        col
+        for col in DISCOUNT_HIST_EXPORT_COLUMNS
+        if col not in DISCOUNT_HIST_VALUE_COLUMNS and col not in {"year_week", "basket"}
+    ]
+    for col in DISCOUNT_HIST_VALUE_COLUMNS + meta_cols:
+        if col not in result.columns:
+            result[col] = ""
+        left_vals = result[col]
+        right_vals = other[col] if col in other.columns else pd.Series("", index=idx)
+        left_blank = _blank_mask(left_vals)
+        right_blank = _blank_mask(right_vals)
+        if col in DISCOUNT_HIST_VALUE_COLUMNS:
+            take_right = ~right_blank
+        else:
+            take_right = left_blank & ~right_blank
+        if take_right.any():
+            result.loc[take_right, col] = right_vals.loc[take_right]
+        result[col] = result[col].where(~_blank_mask(result[col]), "")
+
+    result["year_week"] = [str(v[0]) for v in result.index]
+    result["basket"] = [str(v[1]) for v in result.index]
+    return _sort_discount_hist_frame(result.reset_index(drop=True))
+
+
+def unique_discount_hist_dataframes(
+    dataframes: list[pd.DataFrame | None],
+) -> list[pd.DataFrame]:
+    """Drop null/empty frames and duplicate object identities (same shared hist)."""
+    unique: list[pd.DataFrame] = []
+    seen: set[int] = set()
+    for df in dataframes:
+        if df is None or getattr(df, "empty", True):
+            continue
+        marker = id(df)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(df)
+    return unique
+
+
 def merge_discount_hist_export(
     source_df: pd.DataFrame | None,
     new_rows: list[dict],
@@ -1263,19 +1410,20 @@ def merge_discount_hist_export(
         for row in new_rows
         if str(row.get("basket", "")).strip()
     }
+    source = dataframe_to_discount_hist_export(source_df)
+    if source.empty:
+        merged = list(new_by_key.values())
+    else:
+        weeks = source["year_week"].astype(str)
+        baskets = source["basket"].astype(str)
+        keep = [
+            (week, basket) not in new_by_key
+            for week, basket in zip(weeks.tolist(), baskets.tolist())
+        ]
+        kept = source.loc[keep]
+        merged = kept.to_dict(orient="records")
+        merged.extend(new_by_key.values())
 
-    merged: list[dict] = []
-    report = normalize_csv_df(source_df)
-    for _, row in report.iterrows():
-        hist_row = _source_row_to_discount_hist_export(row)
-        if hist_row is None:
-            continue
-        key = (str(hist_row["year_week"]), str(hist_row["basket"]))
-        if key in new_by_key:
-            continue
-        merged.append(hist_row)
-
-    merged.extend(new_by_key.values())
     merged.sort(
         key=lambda r: (
             str(r.get("year_week", "")),
@@ -1284,22 +1432,6 @@ def merge_discount_hist_export(
         ),
     )
     return merged
-
-
-def _is_blank_discount_hist_value(value: object) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, float) and math.isnan(value):
-        return True
-    text = str(value).strip()
-    return not text or text.lower() in {"n/a", "na", "nan"}
-
-
-def _prefer_discount_hist_value(current: object, incoming: object) -> object:
-    """Keep non-blank values; later files overwrite earlier non-blank values."""
-    if _is_blank_discount_hist_value(incoming):
-        return "" if _is_blank_discount_hist_value(current) else current
-    return incoming
 
 
 def merge_discount_hist_dataframes(
@@ -1312,49 +1444,21 @@ def merge_discount_hist_dataframes(
     later files overwrite earlier ones for the same key/column. Metadata for a
     key is taken from the first non-empty source, updated when a later file
     supplies the same key.
+
+    Identical DataFrame objects (same ``id``) are merged only once — scopes that
+    share one uploaded history no longer multiply the work.
     """
-    if not dataframes:
+    unique = unique_discount_hist_dataframes(list(dataframes or []))
+    if not unique:
         return pd.DataFrame(columns=DISCOUNT_HIST_EXPORT_COLUMNS)
 
-    merged_by_key: dict[tuple[str, str], dict[str, object]] = {}
-    for df in dataframes:
-        if df is None or df.empty:
-            continue
-        report = normalize_csv_df(df)
-        for _, row in report.iterrows():
-            hist_row = _source_row_to_discount_hist_export(row)
-            if hist_row is None:
-                continue
-            key = (str(hist_row["year_week"]), str(hist_row["basket"]))
-            if key not in merged_by_key:
-                merged_by_key[key] = hist_row
-                continue
-            existing = merged_by_key[key]
-            for col in DISCOUNT_HIST_EXPORT_COLUMNS:
-                if col in {"year_week", "basket"}:
-                    continue
-                if col in DISCOUNT_HIST_VALUE_COLUMNS:
-                    existing[col] = _prefer_discount_hist_value(
-                        existing.get(col),
-                        hist_row.get(col),
-                    )
-                elif _is_blank_discount_hist_value(existing.get(col)) and not (
-                    _is_blank_discount_hist_value(hist_row.get(col))
-                ):
-                    existing[col] = hist_row[col]
-
-    if not merged_by_key:
-        return pd.DataFrame(columns=DISCOUNT_HIST_EXPORT_COLUMNS)
-
-    rows = list(merged_by_key.values())
-    rows.sort(
-        key=lambda r: (
-            str(r.get("year_week", "")),
-            len(str(r.get("basket", ""))),
-            str(r.get("basket", "")),
-        ),
-    )
-    return pd.DataFrame(rows, columns=DISCOUNT_HIST_EXPORT_COLUMNS)
+    merged = dataframe_to_discount_hist_export(unique[0])
+    for frame in unique[1:]:
+        merged = _coalesce_discount_hist_frames(
+            merged,
+            dataframe_to_discount_hist_export(frame),
+        )
+    return _sort_discount_hist_frame(merged)
 
 
 def combine_discount_hist_export_by_category(

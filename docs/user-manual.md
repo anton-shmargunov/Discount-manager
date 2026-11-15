@@ -2,7 +2,7 @@
 
 **Pricing Correlation & Bucket Analysis · Phase 1**
 
-Version 1.0.2.t1 · Last updated 2026-10-10
+Version 1.0.3.t2 · Last updated 2026-11-14
 
 ---
 

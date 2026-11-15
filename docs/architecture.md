@@ -2,7 +2,7 @@
 
 **Pricing Correlation & Bucket Analysis · Phase 1 Streamlit MVP**
 
-Version 1.0.2.t1 · Last updated 2026-10-10
+Version 1.0.3.t2 · Last updated 2026-11-14
 
 ---
 
@@ -602,7 +602,7 @@ pytest is not installed; the file runs as a script. Compile check: `python -m py
 | Packages | Pinned in `requirements.txt`. Streamlit `1.66.1` on Cloud (Python ≥ 3.11), `1.49.1` locally on Python 3.9; both need `width="stretch"`. 1.49.1 on Cloud served frontend files slowly or with HTTP 500 ("Failed to fetch dynamically imported module", missing icons). Pins avoid surprise upgrades on Cloud rebuilds, which break open browser tabs |
 | Secrets | `[app_users]` login entries (see [Access control](#access-control)). Optional `[gdrive]` for Drive save/restore (`docs/gdrive-setup.md`). Add `[app_users]` on Cloud **before** pushing, or the page is locked |
 
-Each Cloud app redeploys (~1 minute) when its branch is pushed: the main app from `main`, the test app from `v1-1-test_1`.
+Each Cloud app redeploys (~1 minute) when its branch is pushed: the main app from `main`, test apps from `v1-0-test_1` / `v1-0-test_2`.
 
 Layout widths use `width="stretch"`; `use_container_width` is deprecated and must not be reintroduced. `st.plotly_chart` gets no width argument: it stretches by default in both 1.49 and newer releases.
 

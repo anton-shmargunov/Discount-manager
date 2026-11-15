@@ -9,11 +9,16 @@ Responsibilities:
 Must NOT contain: analytical logic, transformations, clustering, or modeling code.
 """
 
+import faulthandler
+
 import streamlit as st
 
 from configs.settings import APP_TITLE, APP_VERSION
 from configs.theme_bootstrap import apply_page_theme
 from ui.flow_ui import render_flow_caption
+
+# A native crash (segmentation fault) prints every thread's Python stack to the log.
+faulthandler.enable(all_threads=True)
 
 st.set_page_config(
     page_title=APP_TITLE,

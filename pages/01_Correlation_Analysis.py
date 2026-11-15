@@ -10,12 +10,16 @@ No analytical logic lives here.
 """
 
 from __future__ import annotations
+import faulthandler
 import hashlib
 import math
 import io
 from pathlib import Path
 import pandas as pd
 import streamlit as st
+
+# A native crash (segmentation fault) prints every thread's Python stack to the log.
+faulthandler.enable(all_threads=True)
 
 from core.analytics.basket_analysis import (
     run_tracking_report_analysis,
@@ -63,6 +67,11 @@ from ui.release_ui import (
     warn_foreign_flow_uploads,
 )
 from ui.week_discount_ui import render_week_discount_section
+from ui.week_discount_exports import (
+    clear_hist_export_cache,
+    set_shared_discount_hist,
+    sync_shared_discount_hist,
+)
 from ui.project_save_ui import apply_pending_project_restore, render_sidebar_project_panel
 from ui.planner_ui import begin_job_assignment, render_sidebar_planner_panel
 from ui.product_bs_scope import (
@@ -1326,7 +1335,8 @@ def _apply_optional_discount_hist(
             discount_category,
         )
     )
-    return df_discount_hist.copy()
+    # Same object for every scope / shared session key (no per-category copy).
+    return df_discount_hist
 
 
 def _quadweek_fit_options(ts: BasketTimeSeries) -> list[str]:
@@ -1740,6 +1750,7 @@ def _init_state() -> None:
 _init_state()
 ss = st.session_state
 apply_pending_project_restore()
+sync_shared_discount_hist(ss)
 if ss.get("fi_product_bs_category") not in flow_category_choices:
     ss["fi_product_bs_category"] = flow_category_choices[0]
 
@@ -1973,12 +1984,14 @@ if build_clicked:
                         general_filters=general_filters,
                         targeted_filters=targeted_filters,
                     )
-                    pbs_scope["discount_hist_df"] = _apply_optional_discount_hist(
+                    hist_df = _apply_optional_discount_hist(
                         analysis.basket_data,
                         hist_files or None,
                         AGGREGATED_DISCOUNT_HIST_CATEGORY,
                         log_lines,
                     )
+                    pbs_scope["discount_hist_df"] = hist_df
+                    set_shared_discount_hist(ss, hist_df)
                 else:
                     df_report = pd.read_csv(io.BytesIO(file_tracking.read()), low_memory=False)
                     log_lines.append(f"TrackingBaskets product_BS rows uploaded: {len(df_report)}")
@@ -1995,12 +2008,14 @@ if build_clicked:
                         targeted_filters=targeted_filters,
                     )
                     log_lines.extend(parser_warnings)
-                    pbs_scope["discount_hist_df"] = _apply_optional_discount_hist(
+                    hist_df = _apply_optional_discount_hist(
                         analysis.basket_data,
                         hist_files or None,
                         product_bs_category,
                         log_lines,
                     )
+                    pbs_scope["discount_hist_df"] = hist_df
+                    set_shared_discount_hist(ss, hist_df)
                 pbs_scope["analysis"] = analysis
                 pbs_scope["inputs"] = {
                     "report": str(getattr(file_tracking, "name", "") or ""),
@@ -2015,6 +2030,8 @@ if build_clicked:
                             f"the report ends at week {latest_week}."
                         )
                 clear_product_bs_scope_derived(pbs_scope)
+                clear_hist_export_cache(ss)
+                ss.pop("_wd_ui_hist_current_cache", None)
                 log_lines.append("Filter levels: General and Targeted (both applied)")
                 log_lines.extend(_analysis_log_lines(analysis))
                 _set_log(log_lines)
@@ -2302,7 +2319,7 @@ if fit_cp_col.button("Fit Cost x Price", width="stretch"):
 csv_bytes  = df_table.to_csv(index=False).encode()
 exp_col.download_button(
     "⬇ Export CSV", data=csv_bytes,
-    file_name="pcba_results.csv", mime="text/csv",
+    file_name="pcba_results.csv", mime="text/csv", on_click="ignore",
 )
 
 basket_weight_metric = "stock"
@@ -3194,6 +3211,7 @@ export_total_placeholder.download_button(
     data=edited_sumup.to_csv(index=False).encode(),
     file_name="sumup_total.csv",
     mime="text/csv",
+    on_click="ignore",
     help="Export the Sum-Up table in the same column format currently shown.",
 )
 
@@ -3203,6 +3221,7 @@ tb_raw_placeholder.download_button(
     data=tb_raw_df.to_csv(index=False).encode(),
     file_name="TB Raw selected weeks.csv",
     mime="text/csv",
+    on_click="ignore",
     disabled=not selected_sumup_weeks,
     help="Export selected weeks in basket-level raw format. Select at least one week in the table.",
 )
@@ -3546,6 +3565,7 @@ if scope["selected_week"] and scope["selected_week"] in result.weekly_totals:
                 data=df_week_detail.to_csv(index=False).encode(),
                 file_name=f"weekly_detail_{selected_week}.csv",
                 mime="text/csv",
+                on_click="ignore",
                 key=sk(f"week_detail_export_{selected_week}_btn"),
                 help="Export all basket rows for this week (raw numeric values).",
             )

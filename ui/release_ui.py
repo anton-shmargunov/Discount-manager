@@ -238,6 +238,7 @@ def _release_dialog(parts: dict[str, Any], week: str, category: str, input_mode:
             data=zip_bytes,
             file_name=zip_name,
             mime="application/zip",
+            on_click="ignore",
             type="primary",
             width="stretch",
             key="_release_zip_download_btn",

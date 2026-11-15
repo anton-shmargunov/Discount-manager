@@ -132,6 +132,7 @@ def _save_project_dialog() -> None:
         data=data,
         file_name=filename,
         mime="application/octet-stream",
+        on_click="ignore",
         type="primary",
         width="stretch",
         key="_project_dialog_download_btn",
@@ -149,6 +150,7 @@ def _save_project_dialog() -> None:
             data=history.data,
             file_name=hist_name,
             mime="text/csv",
+            on_click="ignore",
             width="stretch",
             key="_project_dialog_hist_download_btn",
             help="Discount history in the input format, for next week's analysis.",
@@ -345,6 +347,14 @@ def apply_pending_project_restore() -> None:
                 known_flow_ids=known_flow_ids(),
             )
         log_lines = apply_project_payload(st.session_state, payload)
+        from ui.week_discount_exports import (
+            clear_hist_export_cache,
+            sync_shared_discount_hist,
+        )
+
+        sync_shared_discount_hist(st.session_state)
+        clear_hist_export_cache(st.session_state)
+        st.session_state.pop("_wd_ui_hist_current_cache", None)
         if warning:
             log_lines.append(warning)
         st.session_state.log_messages = log_lines

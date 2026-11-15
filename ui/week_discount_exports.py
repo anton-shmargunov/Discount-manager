@@ -35,6 +35,7 @@ from core.transforms.data_prep import (
     merge_discount_hist_dataframes,
     merge_discount_hist_export,
     parse_full_basket_list,
+    unique_discount_hist_dataframes,
 )
 from ui.product_bs_scope import (
     AGGREGATED_DISCOUNT_HIST_CATEGORY,
@@ -43,6 +44,106 @@ from ui.product_bs_scope import (
     product_bs_scope_key,
     scoped_widget_key,
 )
+
+# One uploaded/released history for the session; scopes hold the same object.
+SHARED_DISCOUNT_HIST_KEY = "_discount_hist_df"
+_HIST_EXPORT_CACHE_KEY = "_hist_export_cache"
+_HIST_EXPORT_CACHE_LIMIT = 24
+
+
+def clear_hist_export_cache(ss: Any) -> None:
+    """Drop cached Current/All history CSVs (call after Build / generate / restore)."""
+    try:
+        ss.pop(_HIST_EXPORT_CACHE_KEY, None)
+    except Exception:
+        pass
+
+
+def set_shared_discount_hist(ss: Any, hist_df: Optional[pd.DataFrame]) -> None:
+    """Store one shared history and point every scope hist at the same object."""
+    if hist_df is None:
+        return
+    ss[SHARED_DISCOUNT_HIST_KEY] = hist_df
+    scopes = ss.get("_pbs_scopes") or {}
+    if not isinstance(scopes, dict):
+        return
+    for scope in scopes.values():
+        if isinstance(scope, dict) and scope.get("discount_hist_df") is not None:
+            scope["discount_hist_df"] = hist_df
+
+
+def sync_shared_discount_hist(ss: Any) -> Optional[pd.DataFrame]:
+    """Ensure ``_discount_hist_df`` exists and scopes share one DataFrame object.
+
+    After a project restore each scope may hold its own copy of the same table;
+    collapsing them avoids merging the same 30k rows five times on every redraw.
+    """
+    scopes = ss.get("_pbs_scopes") or {}
+    if not isinstance(scopes, dict):
+        scopes = {}
+    shared = ss.get(SHARED_DISCOUNT_HIST_KEY)
+    if not isinstance(shared, pd.DataFrame) or shared.empty:
+        shared = None
+        for scope in scopes.values():
+            if not isinstance(scope, dict):
+                continue
+            candidate = scope.get("discount_hist_df")
+            if isinstance(candidate, pd.DataFrame) and not candidate.empty:
+                shared = candidate
+                break
+    if shared is None:
+        return None
+    ss[SHARED_DISCOUNT_HIST_KEY] = shared
+    for scope in scopes.values():
+        if isinstance(scope, dict) and scope.get("discount_hist_df") is not None:
+            scope["discount_hist_df"] = shared
+    return shared
+
+
+def get_shared_discount_hist(ss: Any) -> Optional[pd.DataFrame]:
+    hist = ss.get(SHARED_DISCOUNT_HIST_KEY)
+    if isinstance(hist, pd.DataFrame) and not hist.empty:
+        return hist
+    return sync_shared_discount_hist(ss)
+
+
+def _hist_cache_store(ss: Any) -> dict:
+    cache = ss.get(_HIST_EXPORT_CACHE_KEY)
+    if not isinstance(cache, dict):
+        cache = {}
+        ss[_HIST_EXPORT_CACHE_KEY] = cache
+    return cache
+
+
+def _hist_cache_get(ss: Any, key: tuple) -> Any:
+    return _hist_cache_store(ss).get(key)
+
+
+def _hist_cache_put(ss: Any, key: tuple, value: Any) -> Any:
+    cache = _hist_cache_store(ss)
+    cache[key] = value
+    while len(cache) > _HIST_EXPORT_CACHE_LIMIT:
+        cache.pop(next(iter(cache)), None)
+    return value
+
+
+def _hist_fingerprint(ss: Any, scope_key: str, selected_week: str) -> tuple:
+    include_no_stock, include_all_history = _hist_options(ss, scope_key, selected_week)
+    gen = ss.get(scoped_widget_key(scope_key, f"wd_generated_discount_{selected_week}"))
+    prom = ss.get(scoped_widget_key(scope_key, f"wd_generated_prom_{selected_week}"))
+    manual = ss.get(scoped_widget_key(scope_key, f"wd_manual_overrides_{selected_week}"))
+    return (
+        selected_week,
+        include_no_stock,
+        include_all_history,
+        id(gen) if isinstance(gen, dict) else 0,
+        len(gen) if isinstance(gen, dict) else 0,
+        id(prom) if isinstance(prom, dict) else 0,
+        len(prom) if isinstance(prom, dict) else 0,
+        id(manual) if isinstance(manual, dict) else 0,
+        len(manual) if isinstance(manual, dict) else 0,
+        id(get_shared_discount_hist(ss)),
+    )
 
 WEEK_DISCOUNT_MARGIN_ORIGINAL = "Margin"
 WEEK_DISCOUNT_MARGIN_CORRECTED = "Margin Corrected"
@@ -301,16 +402,20 @@ def discount_hist_category_csv(
     selected_week: str,
 ) -> Optional[HistExport]:
     """"Discount history. Current" of one category: its new week merged with its history."""
+    scope_key = product_bs_scope_key(input_mode, category)
+    cache_key = ("hist_cat", input_mode, category, *_hist_fingerprint(ss, scope_key, selected_week))
+    cached = _hist_cache_get(ss, cache_key)
+    if cached is not None or cache_key in _hist_cache_store(ss):
+        return cached
+
     scope = _scope(ss, input_mode, category)
     analysis = scope.get("analysis") if scope else None
     if analysis is None:
-        return None
+        return _hist_cache_put(ss, cache_key, None)
     week_meta = _week_meta(analysis, selected_week)
     if week_meta is None:
-        return None
-    include_no_stock, include_all_history = _hist_options(
-        ss, product_bs_scope_key(input_mode, category), selected_week,
-    )
+        return _hist_cache_put(ss, cache_key, None)
+    include_no_stock, include_all_history = _hist_options(ss, scope_key, selected_week)
     rows = category_hist_export_rows(
         ss,
         input_mode,
@@ -321,14 +426,17 @@ def discount_hist_category_csv(
         full_basket_list=load_full_basket_list(),
     )
     if not rows:
-        return None
-    source = scope.get("discount_hist_df")
+        return _hist_cache_put(ss, cache_key, None)
+    source = get_shared_discount_hist(ss)
+    if source is None:
+        candidate = scope.get("discount_hist_df")
+        source = candidate if isinstance(candidate, pd.DataFrame) and not candidate.empty else None
     merged = merge_discount_hist_export(
-        source if isinstance(source, pd.DataFrame) and not source.empty else None,
+        source,
         rows,
         include_all_history=include_all_history,
     )
-    return _hist_frame_export(merged, week_meta, [category])
+    return _hist_cache_put(ss, cache_key, _hist_frame_export(merged, week_meta, [category]))
 
 
 def discount_hist_all_csv(
@@ -341,21 +449,38 @@ def discount_hist_all_csv(
 
     The plain TrackingBaskets report mode has one scope, so ALL is that scope's history.
     Uses the current scope's "Include no stock" and "all history" options.
+
+    Results are cached in session state so Week Discount toggles do not rebuild
+    the full history CSV on every Streamlit rerun.
     """
+    scope_key = product_bs_scope_key(input_mode, current_category)
+    built = tuple(cat for cat, _ in _built_scopes(ss, input_mode))
+    cache_key = (
+        "hist_all",
+        input_mode,
+        current_category,
+        built,
+        *_hist_fingerprint(ss, scope_key, selected_week),
+    )
+    cached = _hist_cache_get(ss, cache_key)
+    if cached is not None or cache_key in _hist_cache_store(ss):
+        return cached
+
     current_scope = _scope(ss, input_mode, current_category)
     analysis = current_scope.get("analysis") if current_scope else None
     if analysis is None:
-        return None
+        return _hist_cache_put(ss, cache_key, None)
     week_meta = _week_meta(analysis, selected_week)
     if week_meta is None:
-        return None
+        return _hist_cache_put(ss, cache_key, None)
     full_basket_list = load_full_basket_list()
-    include_no_stock, include_all_history = _hist_options(
-        ss, product_bs_scope_key(input_mode, current_category), selected_week,
-    )
+    include_no_stock, include_all_history = _hist_options(ss, scope_key, selected_week)
 
     category_rows: dict[str, list[dict]] = {}
     sources: list[pd.DataFrame] = []
+    shared = get_shared_discount_hist(ss)
+    if shared is not None:
+        sources.append(shared)
     for category, scope in _built_scopes(ss, input_mode):
         rows = category_hist_export_rows(
             ss,
@@ -368,15 +493,23 @@ def discount_hist_all_csv(
         )
         if rows:
             category_rows[category] = rows
-        source = scope.get("discount_hist_df")
-        if isinstance(source, pd.DataFrame) and not source.empty:
-            sources.append(source)
+        if shared is None:
+            source = scope.get("discount_hist_df")
+            if isinstance(source, pd.DataFrame) and not source.empty:
+                sources.append(source)
     if not category_rows:
-        return None
-    combined_source = merge_discount_hist_dataframes(sources) if sources else None
+        return _hist_cache_put(ss, cache_key, None)
+    unique_sources = unique_discount_hist_dataframes(sources)
+    combined_source = (
+        merge_discount_hist_dataframes(unique_sources) if unique_sources else None
+    )
     merged = merge_discount_hist_export(
         combined_source if combined_source is not None and not combined_source.empty else None,
         combine_discount_hist_export_by_category(category_rows),
         include_all_history=include_all_history,
     )
-    return _hist_frame_export(merged, week_meta, list(category_rows))
+    return _hist_cache_put(
+        ss,
+        cache_key,
+        _hist_frame_export(merged, week_meta, list(category_rows)),
+    )

@@ -83,6 +83,7 @@ from ui.week_discount_exports import (
     WEEK_DISCOUNT_MARGIN_CORRECTED,
     WEEK_DISCOUNT_MARGIN_SOURCES,
     WEEK_DISCOUNT_VIEW_TOGGLES,
+    clear_hist_export_cache,
     discount_hist_all_csv,
     export_all_history_key,
     include_no_stock_key,
@@ -97,6 +98,13 @@ from core.transforms.data_prep import (
     build_discount_hist_export_rows,
     merge_discount_hist_export,
 )
+
+_UI_HIST_CACHE_KEY = "_wd_ui_hist_current_cache"
+
+
+def _invalidate_hist_caches(ss) -> None:
+    clear_hist_export_cache(ss)
+    ss.pop(_UI_HIST_CACHE_KEY, None)
 
 DISCOUNT_SETTINGS_CSV = STRATEGIES_V1_PATH
 # Bump when strategies file parsing or default layout changes (invalidates Streamlit caches).
@@ -922,6 +930,7 @@ def render_week_discount_section(
         )
         ss[generated_discount_key] = generated
         progress.empty()
+        _invalidate_hist_caches(ss)
         st.rerun()
     if generate_prom_clicked:
         progress.progress(80, text="Generating promotions…")
@@ -942,6 +951,7 @@ def render_week_discount_section(
         )
         ss[generated_prom_key] = generated
         progress.empty()
+        _invalidate_hist_caches(ss)
         st.rerun()
     if generate_discount_all_clicked:
         progress.progress(80, text="Generating discounts for all Jobs…")
@@ -952,6 +962,7 @@ def render_week_discount_section(
             planner_state,
         )
         progress.empty()
+        _invalidate_hist_caches(ss)
         st.rerun()
     if generate_prom_all_clicked:
         progress.progress(80, text="Generating promotions for all Jobs…")
@@ -961,6 +972,7 @@ def render_week_discount_section(
             planner_state,
         )
         progress.empty()
+        _invalidate_hist_caches(ss)
         st.rerun()
 
     if edit_mode:
@@ -1071,6 +1083,7 @@ def render_week_discount_section(
             ss[manual_revision_key] = manual_revision + 1
             ss[manual_edit_key] = False
             progress.empty()
+            _invalidate_hist_caches(ss)
             st.rerun()
     else:
         st.dataframe(
@@ -1154,6 +1167,7 @@ def render_week_discount_section(
                 f"week_discount_{selected_week}.csv",
             ),
             mime="text/csv",
+            on_click="ignore",
             disabled=df_export.empty or edit_mode,
             width="stretch",
             key=wk(
@@ -1179,23 +1193,52 @@ def render_week_discount_section(
         except ValueError:
             next_week_meta = None
         if next_week_meta is not None:
-            new_hist_rows = build_discount_hist_export_rows(
-                export_rows,
-                next_week_meta,
+            # Hist CSV bytes do not depend on column toggles (e.g. Monthly Reserve).
+            # Cache by filter/generate/history options so those toggles stay cheap.
+            ui_hist_key = (
+                str(selected_week),
                 discount_hist_category,
-                assignments=assignment_lookup(planner_state),
+                filter_state_key,
+                gen_state_key,
+                prom_state_key,
+                manual_state_key,
+                int(include_no_stock),
+                int(export_all_history),
+                id(discount_hist_df) if discount_hist_df is not None else 0,
+                len(export_rows),
             )
-            hist_export_rows = merge_discount_hist_export(
-                discount_hist_df,
-                new_hist_rows,
-                include_all_history=export_all_history,
-            )
-            df_hist_export = pd.DataFrame(
-                hist_export_rows, columns=DISCOUNT_HIST_EXPORT_COLUMNS
-            )
+            ui_hist_cache = ss.get(_UI_HIST_CACHE_KEY)
+            if not isinstance(ui_hist_cache, dict):
+                ui_hist_cache = {}
+                ss[_UI_HIST_CACHE_KEY] = ui_hist_cache
+            cached_ui_hist = ui_hist_cache.get(ui_hist_key)
+            if cached_ui_hist is None:
+                new_hist_rows = build_discount_hist_export_rows(
+                    export_rows,
+                    next_week_meta,
+                    discount_hist_category,
+                    assignments=assignment_lookup(planner_state),
+                )
+                hist_export_rows = merge_discount_hist_export(
+                    discount_hist_df,
+                    new_hist_rows,
+                    include_all_history=export_all_history,
+                )
+                df_hist_export = pd.DataFrame(
+                    hist_export_rows, columns=DISCOUNT_HIST_EXPORT_COLUMNS
+                )
+                hist_bytes = (
+                    df_hist_export.to_csv(index=False).encode()
+                    if not df_hist_export.empty
+                    else b""
+                )
+                cached_ui_hist = (df_hist_export, hist_bytes)
+                ui_hist_cache.clear()
+                ui_hist_cache[ui_hist_key] = cached_ui_hist
+            df_hist_export, hist_current_bytes = cached_ui_hist
             hist_export_col.download_button(
                 "Discount history. Current",
-                data=df_hist_export.to_csv(index=False).encode(),
+                data=hist_current_bytes,
                 file_name=export_file_name(
                     KIND_DISCOUNT_HIST,
                     discount_hist_category,
@@ -1203,7 +1246,8 @@ def render_week_discount_section(
                     f"discount_hist_{next_week_meta['year_week']}.csv",
                 ),
                 mime="text/csv",
-                disabled=df_hist_export.empty or edit_mode,
+                on_click="ignore",
+                disabled=not hist_current_bytes or edit_mode,
                 width="stretch",
                 key=wk(
                     f"week_discount_hist_export_{selected_week}_{view_state_key}_"
@@ -1224,8 +1268,8 @@ def render_week_discount_section(
                 ),
             )
             export_parts["next_week"] = str(next_week_meta["year_week"])
-            if not df_hist_export.empty and not edit_mode:
-                export_parts["hist_current"] = df_hist_export.to_csv(index=False).encode()
+            if hist_current_bytes and not edit_mode:
+                export_parts["hist_current"] = hist_current_bytes
             if hist_all_col is not None and input_mode is not None:
                 hist_all = discount_hist_all_csv(
                     ss, input_mode, discount_hist_category, str(selected_week),
@@ -1242,6 +1286,7 @@ def render_week_discount_section(
                         f"discount_hist_all_bs_{next_week_meta['year_week']}.csv",
                     ),
                     mime="text/csv",
+                    on_click="ignore",
                     disabled=hist_all is None or edit_mode,
                     width="stretch",
                     key=wk(

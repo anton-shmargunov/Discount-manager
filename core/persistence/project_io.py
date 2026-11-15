@@ -152,6 +152,8 @@ def _dataframe_without_arrow(frame: Any) -> Any:
 
 def _scopes_for_pickle(scopes: dict[str, Any]) -> dict[str, Any]:
     packed: dict[str, Any] = {}
+    # Convert each distinct hist DataFrame once; shared refs stay shared in the payload.
+    hist_by_id: dict[int, Any] = {}
     for key, scope in scopes.items():
         if not isinstance(scope, dict):
             packed[key] = scope
@@ -159,7 +161,10 @@ def _scopes_for_pickle(scopes: dict[str, Any]) -> dict[str, Any]:
         copied = dict(scope)
         hist = copied.get("discount_hist_df")
         if hist is not None:
-            copied["discount_hist_df"] = _dataframe_without_arrow(hist)
+            marker = id(hist)
+            if marker not in hist_by_id:
+                hist_by_id[marker] = _dataframe_without_arrow(hist)
+            copied["discount_hist_df"] = hist_by_id[marker]
         packed[key] = copied
     return packed
 

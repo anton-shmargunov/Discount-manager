@@ -157,6 +157,7 @@ def _switch_flow_dialog() -> None:
             data=data,
             file_name=default_project_name() + ".disc_proj",
             mime="application/octet-stream",
+            on_click="ignore",
             width="stretch",
             key="_flow_switch_download_btn",
         )

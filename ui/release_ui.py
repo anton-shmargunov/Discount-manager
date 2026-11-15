@@ -316,27 +316,27 @@ def render_release_button(
         _release_dialog(parts, selected_week, category, input_mode)
 
 
-def render_released_history_option(category: str, uploaded_files: Any) -> Optional[dict]:
-    """Offer next week's default discount history; returns the chosen Drive file or ``None``."""
+def prefetch_released_history(category: str) -> None:
+    """Fill the released-history cache for ``category`` (no widgets). Safe no-op offline."""
     flow = current_flow()
     if flow is None:
-        return None
-    store, drive_error = try_drive_store()
+        return
+    store, drive_error = try_drive_store(show_spinner=False)
     if store is None or drive_error:
-        return None
+        return
+    _ensure_released_hist_row(store, flow.flow_id, category)
+
+
+def _ensure_released_hist_row(store: Any, flow_id: str, category: str) -> dict:
+    """Return cached Drive row for released history; fetch once on miss."""
     cache = st.session_state.get(_RELEASED_HIST_KEY)
     if not isinstance(cache, dict):
         cache = {}
-    cache_key = f"{flow.flow_id}::{category}"
+    cache_key = f"{flow_id}::{category}"
     if cache_key not in cache:
-        try:
-            with busy("Looking up released discount history on Google Drive…"):
-                found = FlowStorage(store, flow.flow_id).find_released_history(
-                    history_tag_preference(category)
-                )
-        except DriveClientError as exc:
-            st.caption(f"Released history lookup failed: {exc}")
-            return None
+        found = FlowStorage(store, flow_id).find_released_history(
+            history_tag_preference(category)
+        )
         cache[cache_key] = (
             {
                 "name": found.name,
@@ -348,20 +348,54 @@ def render_released_history_option(category: str, uploaded_files: Any) -> Option
             else {}
         )
         st.session_state[_RELEASED_HIST_KEY] = cache
-    row = cache.get(cache_key) or {}
-    if not row:
-        st.caption(f"No released discount history on Drive for flow {flow.flow_id} yet.")
+    return cache.get(cache_key) or {}
+
+
+def render_released_history_option(category: str, uploaded_files: Any) -> Optional[dict]:
+    """Offer next week's default discount history; returns the chosen Drive file or ``None``."""
+    flow = current_flow()
+    if flow is None:
         return None
-    if uploaded_files:
-        st.caption(f"Uploaded file(s) are used instead of the released history {row['name']}.")
+    store, drive_error = try_drive_store(show_spinner=False)
+    if store is None or drive_error:
         return None
-    use = st.checkbox(
-        f"Use released discount history from Drive: {row['name']} (week {row['week']})",
-        value=True,
-        key="fi_use_released_hist",
-        help="Released (_rlsd) history of this flow, preferring ALL, then this category.",
-    )
-    return row if use else None
+
+    slot = st.empty()
+    cache = st.session_state.get(_RELEASED_HIST_KEY)
+    cache_key = f"{flow.flow_id}::{category}"
+    need_fetch = not (isinstance(cache, dict) and cache_key in cache)
+
+    if need_fetch:
+        with slot.container():
+            with st.spinner("Looking up released discount history on Google Drive…"):
+                try:
+                    row = _ensure_released_hist_row(store, flow.flow_id, category)
+                except DriveClientError as exc:
+                    st.caption(f"Released history lookup failed: {exc}")
+                    return None
+    else:
+        try:
+            row = _ensure_released_hist_row(store, flow.flow_id, category)
+        except DriveClientError as exc:
+            st.caption(f"Released history lookup failed: {exc}")
+            return None
+
+    with slot.container():
+        if not row:
+            st.caption(f"No released discount history on Drive for flow {flow.flow_id} yet.")
+            return None
+        if uploaded_files:
+            st.caption(
+                f"Uploaded file(s) are used instead of the released history {row['name']}."
+            )
+            return None
+        use = st.checkbox(
+            f"Use released discount history from Drive: {row['name']} (week {row['week']})",
+            value=True,
+            key="fi_use_released_hist",
+            help="Released (_rlsd) history of this flow, preferring ALL, then this category.",
+        )
+        return row if use else None
 
 
 def load_released_history(row: dict) -> NamedUpload:

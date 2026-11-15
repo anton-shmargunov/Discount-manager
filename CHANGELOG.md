@@ -12,7 +12,7 @@ Main updates only, newest first. Details live in `handoff_*.md` and `docs/`.
 - **2026-11-14 · Week Discount / Release freezes**: discount-history Current/All CSVs are cached and no longer rebuilt on every toggle (e.g. Monthly Reserve). History merges are vectorized (no `iterrows`), identical hist DataFrames are merged once, and uploaded history is shared across Product BS scopes.
 
 ### Added
-- **2026-11-14 · Busy indicators**: spinners on Drive connect, flow list/start/switch/refresh, project list/save/restore, Release prepare/zip/upload, released-history lookup/download, bulk Fit buttons, and margin-model runs (`ui/busy.py`).
+- **2026-11-14 · Busy indicators**: spinners on Drive connect, flow list/start/switch/refresh, project list/save/restore, Release prepare/zip/upload, released-history lookup/download, bulk Fit buttons, and margin-model runs (`ui/busy.py`). Flow start uses a stable `st.empty()` slot; Drive project listing is on-demand (Load list); Start/Restore warm released-history before Input widgets so the page does not hang mid-form with no spinner.
 
 ### Changed
 - **2026-11-14 · Version** `1.0.2.t1` → `1.0.3.t2`.

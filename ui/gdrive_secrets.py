@@ -26,25 +26,28 @@ def load_drive_config() -> Optional[DriveConfig]:
     return parse_drive_config(section)
 
 
-def get_drive_store() -> Optional[DriveStore]:
+def get_drive_store(*, show_spinner: bool = True) -> Optional[DriveStore]:
     config = load_drive_config()
     if config is None:
         return None
     cached = st.session_state.get("_gdrive_store")
     if isinstance(cached, DriveStore) and cached.config == config:
         return cached
-    with busy("Connecting to Google Drive…"):
+    if show_spinner:
+        with busy("Connecting to Google Drive…"):
+            store = open_drive_store(config)
+    else:
         store = open_drive_store(config)
     st.session_state["_gdrive_store"] = store
     return store
 
 
-def try_drive_store() -> tuple[Optional[DriveStore], Optional[str]]:
+def try_drive_store(*, show_spinner: bool = True) -> tuple[Optional[DriveStore], Optional[str]]:
     """``(store, None)`` when ready; ``(None, None)`` if not configured; ``(None, error)`` on failure."""
     if load_drive_config() is None:
         return None, None
     try:
-        return get_drive_store(), None
+        return get_drive_store(show_spinner=show_spinner), None
     except DriveClientError as exc:
         st.session_state.pop("_gdrive_store", None)
         return None, str(exc)

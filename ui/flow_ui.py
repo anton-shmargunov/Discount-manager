@@ -38,6 +38,8 @@ FLOW_ID_KEY = "_flow_id"
 FLOW_INFO_KEY = "_flow_info"
 FLOW_LIST_KEY = "_flow_list_cache"
 SESSION_FLOWS_KEY = "_flow_session_flows"
+_PENDING_START_KEY = "_pending_start_flow_id"
+FLOW_JUST_STARTED_KEY = "_flow_just_started"
 _KEEP_ON_SWITCH_PREFIXES = ("_auth_",)
 _KEEP_ON_SWITCH_KEYS = frozenset({"_gdrive_store", FLOW_LIST_KEY, SESSION_FLOWS_KEY})
 
@@ -68,14 +70,17 @@ def _session_flows() -> list[Flow]:
     ]
 
 
-def _load_flows(store: Optional[DriveStore]) -> list[Flow]:
+def _load_flows(store: Optional[DriveStore], *, show_spinner: bool = True) -> list[Flow]:
     cached = st.session_state.get(FLOW_LIST_KEY)
     if isinstance(cached, list):
         return [Flow.from_meta(item) for item in cached if isinstance(item, dict)]
     seed = load_seed_flows()
     drive_flows: list[Flow] = []
     if store is not None:
-        with busy("Loading flows from Google Drive…"):
+        if show_spinner:
+            with busy("Loading flows from Google Drive…"):
+                drive_flows = list_drive_flows(store, seed)
+        else:
             drive_flows = list_drive_flows(store, seed)
     flows = merge_flows(seed, drive_flows + _session_flows())
     st.session_state[FLOW_LIST_KEY] = [flow.to_session() for flow in flows]
@@ -243,12 +248,12 @@ def _flow_option_label(flow: Flow) -> str:
 
 
 def _start_flow(flow: Flow, store: Optional[DriveStore], username: str) -> None:
-    with busy(f"Starting flow {flow.display}…"):
-        if store is not None and not flow.folder_id:
-            folder_id = write_flow_meta(store, flow, created_by=username)
-            flow = Flow.from_meta({**flow.to_session(), "folder_id": folder_id, "source": "drive"})
-            _clear_flow_list()
-        _set_current_flow(flow)
+    if store is not None and not flow.folder_id:
+        folder_id = write_flow_meta(store, flow, created_by=username)
+        flow = Flow.from_meta({**flow.to_session(), "folder_id": folder_id, "source": "drive"})
+        _clear_flow_list()
+    _set_current_flow(flow)
+    st.session_state[FLOW_JUST_STARTED_KEY] = True
     st.rerun()
 
 
@@ -258,7 +263,38 @@ def _render_start_screen(username: str) -> None:
         "A flow is an independent product group with its own report, discount history, "
         "projects and Week Discount files. Pick one to start; switch later from the sidebar."
     )
-    store, drive_error = try_drive_store()
+    # Stable slot: spinner and Start-work widgets share this empty so a load/start
+    # replaces the previous tree instead of leaving greyed duplicates (Streamlit stale UI).
+    body = st.empty()
+
+    store, drive_error = try_drive_store(show_spinner=False)
+    pending_id = st.session_state.pop(_PENDING_START_KEY, None)
+    list_miss = not isinstance(st.session_state.get(FLOW_LIST_KEY), list)
+
+    if pending_id or list_miss:
+        with body.container():
+            label = (
+                f"Starting flow…"
+                if pending_id
+                else "Loading flows from Google Drive…"
+            )
+            with st.spinner(label):
+                try:
+                    flows = _load_flows(store, show_spinner=False)
+                except DriveClientError as exc:
+                    st.error(f"Could not read flows from Drive: {exc}")
+                    flows = merge_flows(load_seed_flows(), _session_flows())
+                if pending_id:
+                    by_id = {flow.flow_id: flow for flow in flows}
+                    chosen = by_id.get(pending_id)
+                    if chosen is None:
+                        st.error(f"Flow '{pending_id}' was not found in the list.")
+                    else:
+                        try:
+                            _start_flow(chosen, store, username)
+                        except DriveClientError as exc:
+                            st.error(str(exc))
+
     if drive_error:
         st.warning(drive_error)
     elif store is None:
@@ -267,7 +303,7 @@ def _render_start_screen(username: str) -> None:
             "a flow created here lasts for this session only."
         )
     try:
-        flows = _load_flows(store)
+        flows = _load_flows(store, show_spinner=False)
     except DriveClientError as exc:
         st.error(f"Could not read flows from Drive: {exc}")
         flows = merge_flows(load_seed_flows(), _session_flows())
@@ -275,77 +311,80 @@ def _render_start_screen(username: str) -> None:
         st.warning(" ".join(store.warnings))
         store.warnings.clear()
 
-    _, center, _ = st.columns([1, 2, 1])
-    with center:
-        st.subheader("Start work")
-        if flows:
-            by_id = {flow.flow_id: flow for flow in flows}
-            choice = st.selectbox(
-                "Flow",
-                list(by_id),
-                format_func=lambda flow_id: _flow_option_label(by_id[flow_id]),
-                key="_flow_start_choice",
-            )
-            start_col, refresh_col = st.columns([2, 1])
-            if start_col.button("Start", type="primary", width="stretch", key="_flow_start_btn"):
-                try:
-                    _start_flow(by_id[choice], store, username)
-                except DriveClientError as exc:
-                    st.error(str(exc))
-            if refresh_col.button("Refresh list", width="stretch", key="_flow_refresh_btn"):
-                with busy("Refreshing flow list…"):
-                    _clear_flow_list()
-                st.rerun()
-        else:
-            st.caption("No flows yet. Create the first one below.")
-
-        with st.expander("Create new flow", expanded=not flows):
-            new_id = st.text_input(
-                "Flow id",
-                key="_flow_new_id",
-                placeholder="e.g. C-used",
-                help=(
-                    "Folder name and file tag. Starts with a letter; letters, digits and '-'; "
-                    "2–20 characters. It cannot be changed later."
-                ),
-            ).strip()
-            id_error = validate_flow_id(new_id, [flow.flow_id for flow in flows]) if new_id else None
-            if id_error:
-                st.error(id_error)
-            new_label = st.text_input("Label", key="_flow_new_label", placeholder="e.g. Used C")
-            new_categories = st.multiselect(
-                "Product BS categories",
-                PRODUCT_BS_CATEGORY_OPTIONS,
-                key="_flow_new_categories",
-                help="Categories offered in this flow. Leave empty to offer all.",
-            )
-            wd_options = [
-                item for item in (list(new_categories) or PRODUCT_BS_CATEGORY_OPTIONS)
-                if item != "none"
-            ]
-            new_wd_categories = st.multiselect(
-                "Week Discount files on release",
-                wd_options,
-                default=[item for item in ("Aggregated",) if item in wd_options],
-                key="_flow_new_wd_categories_" + "-".join(wd_options),
-                help=(
-                    "Week Discount files ticked by default in Release → ALL: one aggregated "
-                    "file, or one file per category (e.g. In, Out, ByCondition, ByMinPrice)."
-                ),
-            )
-            if st.button(
-                "Create flow…",
-                disabled=not new_id or bool(id_error),
-                width="stretch",
-                key="_flow_create_btn",
-            ):
-                _create_flow_dialog(
-                    new_id,
-                    new_label.strip(),
-                    list(new_categories),
-                    list(new_wd_categories),
-                    username,
+    with body.container():
+        _, center, _ = st.columns([1, 2, 1])
+        with center:
+            st.subheader("Start work")
+            if flows:
+                by_id = {flow.flow_id: flow for flow in flows}
+                choice = st.selectbox(
+                    "Flow",
+                    list(by_id),
+                    format_func=lambda flow_id: _flow_option_label(by_id[flow_id]),
+                    key="_flow_start_choice",
                 )
+                start_col, refresh_col = st.columns([2, 1])
+                if start_col.button("Start", type="primary", width="stretch", key="_flow_start_btn"):
+                    st.session_state[_PENDING_START_KEY] = choice
+                    st.rerun()
+                if refresh_col.button("Refresh list", width="stretch", key="_flow_refresh_btn"):
+                    _clear_flow_list()
+                    st.rerun()
+            else:
+                st.caption("No flows yet. Create the first one below.")
+
+            with st.expander("Create new flow", expanded=not flows):
+                new_id = st.text_input(
+                    "Flow id",
+                    key="_flow_new_id",
+                    placeholder="e.g. C-used",
+                    help=(
+                        "Folder name and file tag. Starts with a letter; letters, digits and '-'; "
+                        "2–20 characters. It cannot be changed later."
+                    ),
+                ).strip()
+                id_error = (
+                    validate_flow_id(new_id, [flow.flow_id for flow in flows]) if new_id else None
+                )
+                if id_error:
+                    st.error(id_error)
+                new_label = st.text_input(
+                    "Label", key="_flow_new_label", placeholder="e.g. Used C"
+                )
+                new_categories = st.multiselect(
+                    "Product BS categories",
+                    PRODUCT_BS_CATEGORY_OPTIONS,
+                    key="_flow_new_categories",
+                    help="Categories offered in this flow. Leave empty to offer all.",
+                )
+                wd_options = [
+                    item
+                    for item in (list(new_categories) or PRODUCT_BS_CATEGORY_OPTIONS)
+                    if item != "none"
+                ]
+                new_wd_categories = st.multiselect(
+                    "Week Discount files on release",
+                    wd_options,
+                    default=[item for item in ("Aggregated",) if item in wd_options],
+                    key="_flow_new_wd_categories_" + "-".join(wd_options),
+                    help=(
+                        "Week Discount files ticked by default in Release → ALL: one aggregated "
+                        "file, or one file per category (e.g. In, Out, ByCondition, ByMinPrice)."
+                    ),
+                )
+                if st.button(
+                    "Create flow…",
+                    disabled=not new_id or bool(id_error),
+                    width="stretch",
+                    key="_flow_create_btn",
+                ):
+                    _create_flow_dialog(
+                        new_id,
+                        new_label.strip(),
+                        list(new_categories),
+                        list(new_wd_categories),
+                        username,
+                    )
 
 
 def require_flow(username: str = "") -> Flow:

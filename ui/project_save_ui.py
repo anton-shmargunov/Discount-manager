@@ -195,11 +195,14 @@ def _save_project_dialog() -> None:
             st.error(f"Could not save to Drive: {exc}")
 
 
-def _drive_project_files(store: DriveStore, flow: Flow) -> list[dict]:
+def _drive_project_files(store: DriveStore, flow: Flow, *, show_spinner: bool = True) -> list[dict]:
     cached = st.session_state.get(_PROJECT_LIST_KEY)
     if isinstance(cached, dict) and cached.get("flow_id") == flow.flow_id:
         return cached["files"]
-    with busy(f"Loading projects from Google Drive ({flow.flow_id})…"):
+    if show_spinner:
+        with busy(f"Loading projects from Google Drive ({flow.flow_id})…"):
+            files = FlowStorage(store, flow.flow_id).list_projects()
+    else:
         files = FlowStorage(store, flow.flow_id).list_projects()
     rows = [
         {
@@ -228,50 +231,90 @@ def _default_project_index(rows: list[dict], category: str) -> int:
 
 
 def _render_drive_restore(store: DriveStore, flow: Flow) -> None:
+    """Drive restore UI. Project list is loaded only on demand (not on every page run)."""
     st.markdown("**Restore from Drive**")
-    if st.button("Refresh list", key="_project_drive_refresh_btn", width="stretch"):
-        with busy("Refreshing project list…"):
+    body = st.empty()
+    cached = st.session_state.get(_PROJECT_LIST_KEY)
+    have_list = isinstance(cached, dict) and cached.get("flow_id") == flow.flow_id
+    fetch = bool(st.session_state.pop("_project_list_fetch", False))
+
+    load_col, refresh_col = st.columns(2)
+    if load_col.button(
+        "Load list" if not have_list else "Reload list",
+        width="stretch",
+        key="_project_drive_load_btn",
+        help="List .disc_proj files for this flow on Google Drive.",
+    ):
+        if have_list:
             _clear_project_list()
+        st.session_state["_project_list_fetch"] = True
         st.rerun()
-    try:
-        rows = _drive_project_files(store, flow)
-    except DriveClientError as exc:
-        st.error(str(exc))
+    if refresh_col.button(
+        "Refresh list",
+        width="stretch",
+        key="_project_drive_refresh_btn",
+        disabled=not have_list and not fetch,
+        help="Clear the cached list and fetch again.",
+    ):
+        _clear_project_list()
+        st.session_state["_project_list_fetch"] = True
+        st.rerun()
+
+    if not have_list and not fetch:
+        st.caption("Click **Load list** to fetch projects from Drive (avoids a long wait on every page load).")
         return
+
+    if fetch or not have_list:
+        with body.container():
+            with st.spinner(f"Loading projects from Google Drive ({flow.flow_id})…"):
+                try:
+                    rows = _drive_project_files(store, flow, show_spinner=False)
+                except DriveClientError as exc:
+                    st.error(str(exc))
+                    return
+    else:
+        try:
+            rows = _drive_project_files(store, flow, show_spinner=False)
+        except DriveClientError as exc:
+            st.error(str(exc))
+            return
+
     if not rows:
+        body.empty()
         st.caption(f"No .disc_proj files in Drive for flow {flow.flow_id} yet.")
         return
     by_id = {row["id"]: row for row in rows}
     ids = [row["id"] for row in rows]
-    choice = st.selectbox(
-        "Cloud project",
-        ids,
-        index=_default_project_index(rows, current_category_tag()),
-        format_func=lambda file_id: (
-            f"{by_id[file_id]['week']} · {by_id[file_id]['name']}"
-            + ("  [released]" if by_id[file_id]["released"] else "")
-        ),
-        key=f"_project_drive_choice_{flow.flow_id}",
-        help="Latest weeks of this flow; released projects are listed first in each week.",
-    )
-    if st.button(
-        "Restore from Drive",
-        width="stretch",
-        type="primary",
-        disabled=not choice,
-        key="_project_restore_drive_btn",
-        help="Replace the current session with the selected Drive project.",
-    ):
-        row = by_id[choice]
-        try:
-            with busy(f"Downloading {row['name']}…"):
-                raw = store.download_file(row["folder_id"], str(choice))
-            st.session_state["_project_bytes"] = raw
-            st.session_state["_project_restore_name"] = row["name"]
-            st.session_state["_do_project_restore"] = True
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Could not read Drive project: {exc}")
+    with body.container():
+        choice = st.selectbox(
+            "Cloud project",
+            ids,
+            index=_default_project_index(rows, current_category_tag()),
+            format_func=lambda file_id: (
+                f"{by_id[file_id]['week']} · {by_id[file_id]['name']}"
+                + ("  [released]" if by_id[file_id]["released"] else "")
+            ),
+            key=f"_project_drive_choice_{flow.flow_id}",
+            help="Latest weeks of this flow; released projects are listed first in each week.",
+        )
+        if st.button(
+            "Restore from Drive",
+            width="stretch",
+            type="primary",
+            disabled=not choice,
+            key="_project_restore_drive_btn",
+            help="Replace the current session with the selected Drive project.",
+        ):
+            row = by_id[choice]
+            try:
+                with busy(f"Downloading {row['name']}…"):
+                    raw = store.download_file(row["folder_id"], str(choice))
+                st.session_state["_project_bytes"] = raw
+                st.session_state["_project_restore_name"] = row["name"]
+                st.session_state["_do_project_restore"] = True
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not read Drive project: {exc}")
 
 
 def render_sidebar_project_panel() -> None:
@@ -318,7 +361,7 @@ def render_sidebar_project_panel() -> None:
                 st.error(f"Could not read project file: {exc}")
 
         flow = current_flow()
-        store, drive_error = try_drive_store()
+        store, drive_error = try_drive_store(show_spinner=False)
         if drive_error:
             st.warning(drive_error)
         elif store is not None and flow is not None:
@@ -360,6 +403,8 @@ def apply_pending_project_restore() -> None:
             sync_shared_discount_hist(st.session_state)
             clear_hist_export_cache(st.session_state)
             st.session_state.pop("_wd_ui_hist_current_cache", None)
+            # Next page paint warms released-history before Input widgets.
+            st.session_state["_drive_warmup_needed"] = True
         if warning:
             log_lines.append(warning)
         st.session_state.log_messages = log_lines

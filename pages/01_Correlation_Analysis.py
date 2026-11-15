@@ -60,9 +60,16 @@ from core.analytics.planner import (
 )
 from core.flows import flow_category_options
 from ui.auth_gate import require_login
-from ui.flow_ui import current_category_tag, render_flow_caption, require_flow
+from ui.flow_ui import (
+    FLOW_JUST_STARTED_KEY,
+    current_category_tag,
+    render_flow_caption,
+    require_flow,
+)
+from ui.gdrive_secrets import try_drive_store
 from ui.release_ui import (
     load_released_history,
+    prefetch_released_history,
     render_released_history_option,
     warn_foreign_flow_uploads,
 )
@@ -1759,6 +1766,14 @@ sync_shared_discount_hist(ss)
 if ss.get("fi_product_bs_category") not in flow_category_choices:
     ss["fi_product_bs_category"] = flow_category_choices[0]
 
+# Warm Drive lookups before widgets so Start / Restore do not hang mid-page with no spinner.
+_warmup = bool(ss.pop(FLOW_JUST_STARTED_KEY, False) or ss.pop("_drive_warmup_needed", False))
+if _warmup:
+    _warm_cat = current_category_tag(ss)
+    with st.spinner(f"Opening flow {current_flow_obj.display}…"):
+        try_drive_store(show_spinner=False)
+        prefetch_released_history(_warm_cat)
+
 with st.sidebar:
     render_sidebar_project_panel()
 
@@ -2153,27 +2168,27 @@ with st.expander("Cost Correction", expanded=True):
     cost_a_min = _parse_float(str(a_min_raw), 0.0)
     cost_a_max = _parse_optional_float(str(a_max_raw))
 
-with busy(f"Preparing {product_bs_category} cost correction…"):
-    if correct_margin:
-        scope["bulk_fit_cost_price"] = fit_bulk_cost_price(
-            result.basket_data,
-            skip_last_points,
-            bool(skip_zero_price),
-        )
-
-    basket_corrections = compute_corrections_for_baskets(
+# No mid-page spinner: a spinner above the chart widgets leaves greyed duplicates.
+if correct_margin:
+    scope["bulk_fit_cost_price"] = fit_bulk_cost_price(
         result.basket_data,
-        scope.get("bulk_fit_cost_price") or {},
         skip_last_points,
         bool(skip_zero_price),
-        str(cost_correction_mode),
-        cost_a_min,
-        cost_a_max,
     )
-    scope["basket_margin_hybrid"] = hybrid_margin_map(
-        result.basket_data,
-        basket_corrections,
-    )
+
+basket_corrections = compute_corrections_for_baskets(
+    result.basket_data,
+    scope.get("bulk_fit_cost_price") or {},
+    skip_last_points,
+    bool(skip_zero_price),
+    str(cost_correction_mode),
+    cost_a_min,
+    cost_a_max,
+)
+scope["basket_margin_hybrid"] = hybrid_margin_map(
+    result.basket_data,
+    basket_corrections,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ④ Cluster Overview

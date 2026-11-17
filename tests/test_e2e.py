@@ -381,6 +381,36 @@ def main():
     assert pipeline_row["New Prom"] == 0.07
     assert abs(pipeline_row["dProm"] - 0.05) < 1e-6
 
+    # Generate must clear manual New Discount locks; otherwise overrides win.
+    from core.analytics.discount_strategy import clear_manual_overrides_for_column
+
+    locked_basket = str(discount_rows[0]["Basket"])
+    other_basket = str(discount_rows[1]["Basket"]) if len(discount_rows) > 1 else "other"
+    locked = {
+        locked_basket: {"New Discount": -0.99, "New Prom": 0.02},
+        other_basket: {"New Discount": -0.50, "New Prom": 0.01},
+    }
+    cleared = clear_manual_overrides_for_column(
+        locked, {locked_basket}, "New Discount",
+    )
+    assert "New Discount" not in cleared.get(locked_basket, {})
+    assert cleared[locked_basket]["New Prom"] == 0.02
+    assert cleared[other_basket]["New Discount"] == -0.50
+    gen_wins = build_working_week_discount_rows(
+        [dict(discount_rows[0])],
+        wd_filters,
+        generated_discount={locked_basket: 0.11},
+        manual_overrides=cleared,
+    )[0]
+    assert gen_wins["New Discount"] == 0.11
+    still_locked = build_working_week_discount_rows(
+        [dict(discount_rows[0])],
+        wd_filters,
+        generated_discount={locked_basket: 0.11},
+        manual_overrides=locked,
+    )[0]
+    assert still_locked["New Discount"] == -0.99
+
     from core.analytics.prom_strategy import (
         PromStrategySettings,
         apply_generated_proms_to_rows,

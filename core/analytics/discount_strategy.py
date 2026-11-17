@@ -737,6 +737,31 @@ def apply_manual_overrides_to_rows(
     return updated
 
 
+def clear_manual_overrides_for_column(
+    overrides: dict[str, dict[str, float]] | None,
+    basket_ids: set[str] | None,
+    column: str,
+) -> dict[str, dict[str, float]]:
+    """Drop ``column`` overrides for ``basket_ids`` (or all baskets if None).
+
+    Generate must clear stale manual New Discount / New Prom locks; otherwise
+    ``build_working_week_discount_rows`` re-applies overrides after generated
+    values and the table never changes.
+    """
+    if not overrides:
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for basket, vals in overrides.items():
+        key = str(basket)
+        if basket_ids is not None and key not in basket_ids:
+            out[key] = dict(vals)
+            continue
+        kept = {col: value for col, value in vals.items() if col != column}
+        if kept:
+            out[key] = kept
+    return out
+
+
 def build_working_week_discount_rows(
     base_rows: list[dict],
     filter_map: dict[str, str],

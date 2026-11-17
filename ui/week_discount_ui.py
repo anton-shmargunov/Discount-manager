@@ -35,6 +35,7 @@ from core.analytics.discount_strategy import (
     apply_generated_discounts_to_rows,
     apply_manual_overrides_to_rows,
     build_working_week_discount_rows,
+    clear_manual_overrides_for_column,
     default_discount_strategy_settings,
     display_rows_to_strategy_bins,
     display_rows_to_mtost_bins,
@@ -929,6 +930,12 @@ def render_week_discount_section(
             )
         )
         ss[generated_discount_key] = generated
+        # Stale Manual-edit locks would otherwise overwrite these values.
+        ss[manual_overrides_key] = clear_manual_overrides_for_column(
+            ss.get(manual_overrides_key),
+            target_ids,
+            NEW_DISCOUNT_COLUMN,
+        )
         progress.empty()
         _invalidate_hist_caches(ss)
         st.rerun()
@@ -950,6 +957,11 @@ def render_week_discount_section(
             )
         )
         ss[generated_prom_key] = generated
+        ss[manual_overrides_key] = clear_manual_overrides_for_column(
+            ss.get(manual_overrides_key),
+            target_ids,
+            NEW_PROM_COLUMN,
+        )
         progress.empty()
         _invalidate_hist_caches(ss)
         st.rerun()
@@ -961,6 +973,11 @@ def render_week_discount_section(
             week_discount_filter_map,
             planner_state,
         )
+        ss[manual_overrides_key] = clear_manual_overrides_for_column(
+            ss.get(manual_overrides_key),
+            None,
+            NEW_DISCOUNT_COLUMN,
+        )
         progress.empty()
         _invalidate_hist_caches(ss)
         st.rerun()
@@ -970,6 +987,11 @@ def render_week_discount_section(
             week_discount_rows,
             week_discount_filter_map,
             planner_state,
+        )
+        ss[manual_overrides_key] = clear_manual_overrides_for_column(
+            ss.get(manual_overrides_key),
+            None,
+            NEW_PROM_COLUMN,
         )
         progress.empty()
         _invalidate_hist_caches(ss)

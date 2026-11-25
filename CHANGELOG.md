@@ -9,6 +9,7 @@ Main updates only, newest first. Details live in `handoff_*.md` and `docs/`.
 ## 1.0.3.t2: 2026-11-14 (branch `v1-0-test_2`)
 
 ### Fixed
+- **2026-11-25 · Cloud segfault when switching Product BS categories**: concurrent Google Drive lookups (`httplib2` / SSL) during released-history scan crashed the process. Drive API calls are serialized with a lock, folder listings are session-cached, and released-history candidates are scanned once per flow (category switches reuse the scan).
 - **2026-11-17 · Generate Discount / Prom ignored after Manual Edit**: Generate now clears stale New Discount / New Prom manual overrides for the baskets it rewrites. Previously `build_working_week_discount_rows` re-applied manual locks after generation, so Job Generate (e.g. Low Margin → 111X) looked like a no-op.
 - **2026-11-14 · Week Discount / Release freezes**: discount-history Current/All CSVs are cached and no longer rebuilt on every toggle (e.g. Monthly Reserve). History merges are vectorized (no `iterrows`), identical hist DataFrames are merged once, and uploaded history is shared across Product BS scopes.
 

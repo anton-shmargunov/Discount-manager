@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Protocol, TypeVar
 
@@ -107,6 +108,9 @@ class DriveStore:
         self.client = client
         self._allowed: set[str] = {config.root_folder_id}
         self.warnings: list[str] = []
+        # Session-scoped list cache: avoids re-hitting Drive (and httplib2/SSL)
+        # on every Product BS category switch / released-history lookup.
+        self._list_cache: dict[tuple[str, str], list[DriveFile]] = {}
 
     @property
     def root_id(self) -> str:
@@ -118,9 +122,33 @@ class DriveStore:
             raise DriveClientError("Folder is not inside the configured PBA Drive folder.")
         return folder
 
+    def _cache_key(self, folder_id: str, mime_type: Optional[str]) -> tuple[str, str]:
+        return (folder_id, mime_type or "")
+
+    def _cached_children(
+        self, folder_id: str, mime_type: Optional[str] = None
+    ) -> list[DriveFile]:
+        key = self._cache_key(folder_id, mime_type)
+        cached = self._list_cache.get(key)
+        if cached is not None:
+            return list(cached)
+        items = self.client.list_children(folder_id, mime_type=mime_type)
+        self._list_cache[key] = list(items)
+        return list(items)
+
+    def clear_list_cache(self, folder_id: Optional[str] = None) -> None:
+        """Drop cached listings (all, or only those under ``folder_id``)."""
+        if folder_id is None:
+            self._list_cache.clear()
+            return
+        folder = str(folder_id)
+        for key in list(self._list_cache):
+            if key[0] == folder:
+                self._list_cache.pop(key, None)
+
     def list_subfolders(self, parent_id: str) -> list[DriveFile]:
         parent = self._require_allowed_folder(parent_id)
-        folders = self.client.list_children(parent, mime_type=FOLDER_MIME)
+        folders = self._cached_children(parent, mime_type=FOLDER_MIME)
         self._allowed.update(item.id for item in folders)
         return folders
 
@@ -145,6 +173,7 @@ class DriveStore:
             return existing
         created = self.client.create_folder(parent_id, safe_drive_filename(name))
         self._allowed.add(created.id)
+        self.clear_list_cache(parent_id)
         return self.find_subfolder(parent_id, name) or created.id
 
     def folder_path(self, names: list[str], *, create: bool) -> Optional[str]:
@@ -170,7 +199,7 @@ class DriveStore:
         folder = self._require_allowed_folder(folder_id)
         files = [
             item
-            for item in self.client.list_children(folder)
+            for item in self._cached_children(folder)
             if item.name and not item.is_folder
         ]
         if name_suffix:
@@ -199,14 +228,18 @@ class DriveStore:
         name = safe_drive_filename(filename)
         existing = [
             item
-            for item in self.client.list_children(folder)
+            for item in self._cached_children(folder)
             if item.name == name and not item.is_folder
         ]
         if existing:
             if not overwrite:
                 raise DriveClientError(f"'{name}' already exists in Drive; files are never overwritten.")
-            return self.client.update_file(existing[0].id, data, mime_type)
-        return self.client.create_file(folder, name, data, mime_type)
+            updated = self.client.update_file(existing[0].id, data, mime_type)
+            self.clear_list_cache(folder)
+            return updated
+        created = self.client.create_file(folder, name, data, mime_type)
+        self.clear_list_cache(folder)
+        return created
 
     def rename_file(self, folder_id: str, file_id: str, new_name: str) -> DriveFile:
         folder = self._require_allowed_folder(folder_id)
@@ -216,12 +249,14 @@ class DriveStore:
         name = safe_drive_filename(new_name)
         clash = [
             item
-            for item in self.client.list_children(folder)
+            for item in self._cached_children(folder)
             if item.name == name and item.id != file_id
         ]
         if clash:
             raise DriveClientError(f"'{name}' already exists in Drive.")
-        return self.client.rename(file_id, name)
+        renamed = self.client.rename(file_id, name)
+        self.clear_list_cache(folder)
+        return renamed
 
 
 class InMemoryDriveClient:
@@ -311,22 +346,28 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 
 
 def _api_call(method: _F) -> _F:
-    """Turn network / API failures into ``DriveClientError`` so pages can show a message."""
+    """Serialize Drive HTTP and map failures to ``DriveClientError``.
+
+    google-api-python-client / httplib2 are not thread-safe. Concurrent Streamlit
+    script runs (e.g. switching Product BS category while a lookup is in flight)
+    can segfault inside SSL reads; a per-client lock prevents that.
+    """
 
     @functools.wraps(method)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        try:
-            return method(*args, **kwargs)
-        except DriveClientError:
-            raise
-        except Exception as exc:
-            detail = f"{type(exc).__name__}: {exc}"
-            if "CERTIFICATE_VERIFY_FAILED" in detail:
-                detail += (
-                    " — HTTPS is intercepted (antivirus, VPN or proxy) and its certificate "
-                    "is not trusted by Python."
-                )
-            raise DriveClientError(f"Google Drive request failed. {detail}") from exc
+    def wrapper(self: "GoogleDriveClient", *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            try:
+                return method(self, *args, **kwargs)
+            except DriveClientError:
+                raise
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+                if "CERTIFICATE_VERIFY_FAILED" in detail:
+                    detail += (
+                        " — HTTPS is intercepted (antivirus, VPN or proxy) and its certificate "
+                        "is not trusted by Python."
+                    )
+                raise DriveClientError(f"Google Drive request failed. {detail}") from exc
 
     return wrapper  # type: ignore[return-value]
 
@@ -336,6 +377,7 @@ class GoogleDriveClient:
 
     def __init__(self, service: Any) -> None:
         self._service = service
+        self._lock = threading.RLock()
 
     @_api_call
     def list_children(self, folder_id: str, mime_type: Optional[str] = None) -> list[DriveFile]:

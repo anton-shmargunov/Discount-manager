@@ -1786,6 +1786,7 @@ def main():
     except DriveClientError:
         pass
     mem.create_folder("ROOT", "A-used")
+    store.clear_list_cache("ROOT")  # out-of-band Drive change; drop stale listing
     assert store.find_subfolder("ROOT", "A-used") == store.folder_path(["A-used"], create=False)
     assert store.warnings and "oldest" in store.warnings[-1]
     store.warnings.clear()

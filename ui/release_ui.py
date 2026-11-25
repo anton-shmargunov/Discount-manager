@@ -49,6 +49,7 @@ from ui.week_discount_exports import (
 )
 
 _RELEASED_HIST_KEY = "_gdrive_released_hist"
+_RELEASED_HIST_CANDIDATES_KEY = "_gdrive_released_hist_candidates"
 _PROJECT_LIST_KEY = "_gdrive_proj_list"
 
 SET_CATEGORY = "category"
@@ -149,7 +150,11 @@ def release_zip_bytes(flow_id: str, items: Iterable[SetItem]) -> tuple[str, byte
 
 def _clear_drive_caches() -> None:
     st.session_state.pop(_RELEASED_HIST_KEY, None)
+    st.session_state.pop(_RELEASED_HIST_CANDIDATES_KEY, None)
     st.session_state.pop(_PROJECT_LIST_KEY, None)
+    store = st.session_state.get("_gdrive_store")
+    if store is not None and hasattr(store, "clear_list_cache"):
+        store.clear_list_cache()
 
 
 def _all_set_parts(
@@ -327,26 +332,72 @@ def prefetch_released_history(category: str) -> None:
     _ensure_released_hist_row(store, flow.flow_id, category)
 
 
+def _released_hist_candidates(store: Any, flow_id: str) -> list[dict]:
+    """Released discount-history files for ``flow_id`` (one Drive scan per session)."""
+    bag = st.session_state.get(_RELEASED_HIST_CANDIDATES_KEY)
+    if not isinstance(bag, dict):
+        bag = {}
+    if flow_id in bag:
+        return list(bag[flow_id] or [])
+    files = FlowStorage(store, flow_id).recent_files(KIND_DISCOUNT_HIST)
+    rows: list[dict] = []
+    for item in files:
+        if not item.released or item.parsed is None or item.parsed.flow_id != flow_id:
+            continue
+        rows.append(
+            {
+                "name": item.name,
+                "folder_id": item.folder_id,
+                "file_id": item.file.id,
+                "week": item.parsed.week or "",
+                "tag": item.parsed.tag or "",
+                "revision": int(item.parsed.revision or 0),
+            }
+        )
+    bag[flow_id] = rows
+    st.session_state[_RELEASED_HIST_CANDIDATES_KEY] = bag
+    return list(rows)
+
+
+def _neg_hist_week(week: str) -> tuple[int, int]:
+    try:
+        year, num = str(week).split("-", 1)
+        return (-int(year), -int(num))
+    except ValueError:
+        return (0, 0)
+
+
+def _pick_released_hist_row(candidates: list[dict], category: str) -> dict:
+    """Same preference as ``FlowStorage.find_released_history``, in memory."""
+    prefs = history_tag_preference(category)
+    matches = [row for row in candidates if row.get("tag") in prefs]
+    if not matches:
+        return {}
+    best = min(
+        matches,
+        key=lambda row: (
+            _neg_hist_week(str(row.get("week") or "")),
+            prefs.index(str(row.get("tag") or "")),
+            -int(row.get("revision") or 0),
+        ),
+    )
+    return {
+        "name": best["name"],
+        "folder_id": best["folder_id"],
+        "file_id": best["file_id"],
+        "week": best["week"],
+    }
+
+
 def _ensure_released_hist_row(store: Any, flow_id: str, category: str) -> dict:
-    """Return cached Drive row for released history; fetch once on miss."""
+    """Return cached Drive row for released history; scan Drive once per flow."""
     cache = st.session_state.get(_RELEASED_HIST_KEY)
     if not isinstance(cache, dict):
         cache = {}
     cache_key = f"{flow_id}::{category}"
     if cache_key not in cache:
-        found = FlowStorage(store, flow_id).find_released_history(
-            history_tag_preference(category)
-        )
-        cache[cache_key] = (
-            {
-                "name": found.name,
-                "folder_id": found.folder_id,
-                "file_id": found.file.id,
-                "week": found.parsed.week if found.parsed else "",
-            }
-            if found is not None
-            else {}
-        )
+        candidates = _released_hist_candidates(store, flow_id)
+        cache[cache_key] = _pick_released_hist_row(candidates, category)
         st.session_state[_RELEASED_HIST_KEY] = cache
     return cache.get(cache_key) or {}
 
